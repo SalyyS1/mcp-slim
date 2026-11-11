@@ -90,6 +90,31 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
         r"\1[REDACTED:URL_SECRET]\3",
     ),
     (
+        "url_query_secret",
+        (
+            "?token=",
+            "&token=",
+            "?access_token=",
+            "&access_token=",
+            "?auth_token=",
+            "&auth_token=",
+            "?api_key=",
+            "&api_key=",
+            "?apikey=",
+            "&apikey=",
+            "?sig=",
+            "&sig=",
+            "?signature=",
+            "&signature=",
+            "X-Amz-Signature=",
+            "x-amz-signature=",
+        ),
+        re.compile(
+            r"(?i)([?&](?:token|access_token|auth_token|api_key|apikey|sig|signature|x-amz-signature|x-amz-security-token)=)([^&\s\"'#]{8,})"
+        ),
+        r"\1[REDACTED:URL_QUERY_SECRET]",
+    ),
+    (
         "env_assignment_secret",
         (
             "API_KEY",
