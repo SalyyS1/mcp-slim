@@ -435,6 +435,27 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertIn("&X-Amz-Signature=[REDACTED:URL_QUERY_SECRET]", redacted)
     self.assertEqual(guard.report.by_category.get("url_query_secret"), 2)
 
+  def test_embedded_resource_flattening_and_slimming(self) -> None:
+    slimmer = OutputSlimmer(flatten_resources=True)
+    raw = {
+        "content": [
+            {"type": "text", "text": "successfully downloaded text file (SHA: abc1234)"},
+            {
+                "type": "resource",
+                "resource": {
+                    "uri": "repo://owner/repo/contents/README.md",
+                    "mimeType": "text/markdown",
+                    "text": "# Project\n\n\n\nSome content   with   extra spaces.",
+                },
+            },
+        ]
+    }
+    slimmed = slimmer.slim_call_result(raw)
+    self.assertEqual(len(slimmed["content"]), 2)
+    self.assertEqual(slimmed["content"][1]["type"], "text")
+    self.assertIn("[Resource: repo://owner/repo/contents/README.md]", slimmed["content"][1]["text"])
+    self.assertIn("# Project\n\nSome content with extra spaces.", slimmed["content"][1]["text"])
+
 
 if __name__ == "__main__":
   unittest.main()

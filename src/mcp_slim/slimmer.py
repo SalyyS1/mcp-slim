@@ -584,11 +584,13 @@ class OutputSlimmer:
       max_string_chars: int = 4000,
       strip_nulls: bool = True,
       strip_hypermedia: bool = True,
+      flatten_resources: bool = True,
   ) -> None:
     self.max_list_items = max_list_items
     self.max_string_chars = max_string_chars
     self.strip_nulls = strip_nulls
     self.strip_hypermedia = strip_hypermedia
+    self.flatten_resources = flatten_resources
 
   def compact_json_value(self, value: Any) -> Any:
     if isinstance(value, dict):
@@ -732,6 +734,21 @@ class OutputSlimmer:
           text = item.get("text")
           if isinstance(text, str):
             item = {**item, "text": self.slim_text(text)}
+        elif (
+            isinstance(item, dict)
+            and item.get("type") == "resource"
+            and isinstance(item.get("resource"), dict)
+        ):
+          res = item["resource"]
+          res_text = res.get("text")
+          if isinstance(res_text, str):
+            slimmed_res = self.slim_text(res_text)
+            if self.flatten_resources:
+              uri = res.get("uri")
+              header = f"[Resource: {uri}]\n" if isinstance(uri, str) and uri else ""
+              item = {"type": "text", "text": f"{header}{slimmed_res}"}
+            else:
+              item = {**item, "resource": {**res, "text": slimmed_res}}
         new_content.append(item)
       out["content"] = new_content
     if "structuredContent" in out and isinstance(
