@@ -36,16 +36,16 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.4.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.5.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
-| **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -51.6% tokens)** |
+| **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -57.4% tokens)** |
 | **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
 | **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
 | **Wildcard Glob Tool Filtering (`get_*,search_*`)** | No | Exact names | No | No | **Yes (`--allow-tools` / `--deny-tools`)** |
-| **`$defs` / `$ref` Inlining (Gemini / Vertex / Azure fix)** | No | No | No | No | **Yes (Recursive with cycle guard)** |
-| **`tools/call` Valid-JSON Budget & Markdown Table Compaction** | No | No | No | No | **Yes (-43%+ output tokens, never breaks JSON)** |
+| **`$defs`/`$ref` Inlining & Gemini/Vertex Dialect Normalization** | No | No | No | No | **Yes (Inlines `$ref`, flattens `anyOf`/`["T","null"]`, strips `discriminator`)** |
+| **`tools/call` Valid-JSON, NDJSON & Head+Tail Log Compaction** | No | No | No | No | **Yes (-43%+ output tokens, preserves stack-trace head & tail)** |
 | **Read-Only Tool Call TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (Auto-invalidated on mutations)** |
 | **Secret Redaction & Tool-Poisoning / Prompt-Injection Shield** | No | No | No | No | **Yes (13 categories, `141 µs` p50)** |
 | **Live Stdio Server Inspector (`mcp-slim inspect`)** | No | No | No | No | **Yes (`mcp-slim inspect -- <cmd>`)** |

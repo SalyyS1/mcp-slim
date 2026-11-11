@@ -381,6 +381,47 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertIn("|id|username|status|", compacted)
     self.assertIn("|---|---|---|", compacted)
 
+  def test_zod_nullable_array_type_normalization_and_gemini_keywords(self) -> None:
+    slimmer = SchemaSlimmer()
+    zod_tool = {
+        "name": "query_records",
+        "description": "Query records.",
+        "inputSchema": {
+            "type": "object",
+            "discriminator": {"propertyName": "kind"},
+            "properties": {
+                "limit": {
+                    "type": ["integer", "null"],
+                    "readOnly": False,
+                    "deprecated": False,
+                },
+            },
+        },
+    }
+    slimmed = slimmer.slim_tool(zod_tool)
+    self.assertNotIn("discriminator", slimmed["inputSchema"])
+    limit_prop = slimmed["inputSchema"]["properties"]["limit"]
+    self.assertEqual(limit_prop["type"], "integer")
+    self.assertNotIn("readOnly", limit_prop)
+    coerced = slimmer.coerce_arguments("query_records", {"limit": "25"})
+    self.assertEqual(coerced["limit"], 25)
+
+  def test_jsonl_compaction_and_head_tail_elision(self) -> None:
+    slimmer = OutputSlimmer(max_string_chars=240)
+    jsonl = (
+        '{"id": 1, "name": "a", "empty": null, "followers_url": "https://api.github.com/u/1"}\n'
+        '{"id": 2, "name": "b", "empty": "", "node_id": "MDQ6VXNlcjI="}'
+    )
+    compacted = slimmer.slim_text(jsonl)
+    self.assertNotIn("followers_url", compacted)
+    self.assertNotIn("node_id", compacted)
+    self.assertIn('{"id":1,"name":"a"}', compacted)
+
+    long_log = "HEAD_COMMAND: pytest -v\n" + ("middle log line\n" * 40) + "TAIL_ERROR: AssertionError: failed"
+    elided = slimmer.slim_text(long_log)
+    self.assertIn("HEAD_COMMAND: pytest -v", elided)
+    self.assertIn("TAIL_ERROR: AssertionError: failed", elided)
+
 
 if __name__ == "__main__":
   unittest.main()

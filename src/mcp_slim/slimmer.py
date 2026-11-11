@@ -80,9 +80,14 @@ _STOP_WORDS = frozenset({
 _REDUNDANT_SCHEMA_KEYS = frozenset({
     "$schema",
     "$id",
+    "$comment",
     "$defs",
     "definitions",
     "additionalProperties",
+    "discriminator",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
     "title",
     "examples",
     "default",
@@ -297,6 +302,11 @@ class SchemaSlimmer:
             for branch in v
         ]
         continue
+      if k == "type" and isinstance(v, list):
+        non_null_types = [t for t in v if isinstance(t, str) and t != "null"]
+        if len(non_null_types) == 1:
+          out[k] = non_null_types[0]
+          continue
       if k == "required" and isinstance(v, list):
         if not v:
           continue
@@ -666,15 +676,47 @@ class OutputSlimmer:
       except (json.JSONDecodeError, TypeError):
         pass
     cleaned = _WHITESPACE_RUN.sub(" ", cleaned)
+    # Compact NDJSON / JSON-Lines payloads where each line is a JSON object
+    if "\n" in stripped and stripped.startswith("{") and stripped.endswith("}"):
+      raw_lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+      if len(raw_lines) > 1 and all(
+          ln.startswith("{") and ln.endswith("}") for ln in raw_lines
+      ):
+        try:
+          jsonl_items = [
+              self.compact_json_value(json.loads(ln))
+              for ln in raw_lines[: self.max_list_items]
+          ]
+          out_lines = [
+              json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+              for item in jsonl_items
+          ]
+          if len(raw_lines) > self.max_list_items:
+            out_lines.append(
+                f"... ({len(raw_lines) - self.max_list_items} more JSONL lines"
+                " truncated by mcp-slim)"
+            )
+          cleaned = "\n".join(out_lines)
+        except (json.JSONDecodeError, TypeError):
+          pass
     cleaned = re.sub(r"\|[\s:-]*-{3,}[\s:-]*(?=\|)", "|---", cleaned)
     cleaned = re.sub(r"\|\s+([^|\n]+?)\s+(?=\|)", r"|\1", cleaned)
     cleaned = _BLANK_LINES.sub("\n\n", cleaned)
     if len(cleaned) > self.max_string_chars:
-      cleaned = (
-          cleaned[: self.max_string_chars]
-          + f"\n... [truncated {len(cleaned) - self.max_string_chars} chars by"
-          " mcp-slim]"
-      )
+      omitted = len(cleaned) - self.max_string_chars
+      if "\n" in cleaned and self.max_string_chars >= 120:
+        head_budget = int(self.max_string_chars * 0.6)
+        tail_budget = self.max_string_chars - head_budget
+        cleaned = (
+            cleaned[:head_budget]
+            + f"\n... [truncated {omitted} chars by mcp-slim] ...\n"
+            + cleaned[-tail_budget:]
+        )
+      else:
+        cleaned = (
+            cleaned[: self.max_string_chars]
+            + f"\n... [truncated {omitted} chars by mcp-slim]"
+        )
     return cleaned
 
   def slim_call_result(
