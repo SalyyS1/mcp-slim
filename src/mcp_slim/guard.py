@@ -114,6 +114,25 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
         ),
         r"\1[REDACTED:ENV_SECRET]\3",
     ),
+    (
+        "prompt_injection",
+        (
+            "<IMPORTANT>",
+            "<important>",
+            "<SYSTEM>",
+            "<system>",
+            "ignore previous instructions",
+            "Ignore previous instructions",
+            "ignore all previous instructions",
+            "Ignore all previous instructions",
+            "disregard previous instructions",
+            "Disregard previous instructions",
+        ),
+        re.compile(
+            r"(?is)(?:<(?:IMPORTANT|SYSTEM|INSTRUCTION)>[\s\S]*?</(?:IMPORTANT|SYSTEM|INSTRUCTION)>|(?:ignore|disregard)\s+(?:all\s+)?(?:previous|prior)\s+instructions[^\n.\"]*)"
+        ),
+        "[REDACTED:PROMPT_INJECTION]",
+    ),
 )
 
 

@@ -36,17 +36,18 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.3.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.4.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -51.6% tokens)** |
 | **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
+| **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
 | **Wildcard Glob Tool Filtering (`get_*,search_*`)** | No | Exact names | No | No | **Yes (`--allow-tools` / `--deny-tools`)** |
 | **`$defs` / `$ref` Inlining (Gemini / Vertex / Azure fix)** | No | No | No | No | **Yes (Recursive with cycle guard)** |
-| **`tools/call` Valid-JSON Budget Compaction & Hypermedia Pruning** | No | No | No | No | **Yes (-43%+ output tokens, never breaks JSON)** |
+| **`tools/call` Valid-JSON Budget & Markdown Table Compaction** | No | No | No | No | **Yes (-43%+ output tokens, never breaks JSON)** |
 | **Read-Only Tool Call TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (Auto-invalidated on mutations)** |
-| **Bidirectional Real-Time Secret Redaction** | No | No | No | No | **Yes (12 categories, `141 µs` p50)** |
+| **Secret Redaction & Tool-Poisoning / Prompt-Injection Shield** | No | No | No | No | **Yes (13 categories, `141 µs` p50)** |
 | **Live Stdio Server Inspector (`mcp-slim inspect`)** | No | No | No | No | **Yes (`mcp-slim inspect -- <cmd>`)** |
 
 ---
@@ -156,13 +157,14 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 - Answers `mcp_search_tools(query, limit)` locally inside the proxy in `<0.1 ms` using BM25 ranking over tool names, descriptions, and parameter keys.
 - Rewrites `mcp_call_tool(tool_name, arguments)` directly into native upstream `tools/call` JSON-RPC requests.
 
-### 3. `OutputSlimmer` & Read-Only TTL Cache (`tools/call`)
-- **Structure-Aware JSON Compaction & Hypermedia Pruning:** Parses JSON strings inside `content[].text`, recursively removes `null`, `""`, `[]`, `{}` values and noisy REST hypermedia keys (`followers_url`, `gists_url`, `node_id`, etc.), and trims oversized object arrays on element boundaries so truncated payloads remain **100% valid, parseable JSON**.
+### 3. `OutputSlimmer`, Type Coercer & Read-Only TTL Cache (`tools/call`)
+- **Schema-Guided Argument Type Coercion:** Automatically coerces stringified integers (`"50"` -> `50`), floats, booleans (`"true"` -> `True`), and JSON arrays/objects in outgoing `tools/call` requests using the cached `inputSchema` from `tools/list`, preventing `-32602 ValidationError` failures on strict FastMCP/Pydantic servers when using local or quantized LLMs.
+- **Structure-Aware JSON Compaction, Markdown Table Slimming & Hypermedia Pruning:** Parses JSON strings inside `content[].text`, recursively removes `null`, `""`, `[]`, `{}` values and noisy REST hypermedia keys (`followers_url`, `gists_url`, `node_id`, etc.), compacts padded ASCII/Markdown tables, and trims oversized object arrays on element boundaries so truncated payloads remain **100% valid, parseable JSON**.
 - **Deterministic Read-Only TTL Cache (`--cache-ttl <seconds>`):** Caches idempotent read calls (`get_*`, `read_*`, `list_*`, `search_*`, `fetch_*`) keyed by canonical arguments and automatically invalidates the cache when any mutating tool is invoked.
 - **UTF-16 Surrogate & ANSI Sanitization:** Strips terminal escape sequences and replaces lone UTF-16 surrogates (`\ud800`–`\udfff`) so malformed tool outputs never crash stdio streams.
 
-### 4. `SecretGuard` (Bidirectional Credential Redaction)
-Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/call` results across 12 credential categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, and env secrets).
+### 4. `SecretGuard` (Bidirectional Credential & Prompt-Injection Shield)
+Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/list` / `tools/call` payloads across 13 categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, env secrets, and hidden MCP tool-poisoning / indirect prompt-injection directives such as `<IMPORTANT>...</IMPORTANT>` or `ignore previous instructions`).
 
 ---
 

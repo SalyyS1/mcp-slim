@@ -117,6 +117,12 @@ class MCPProxy:
           tool_name = params["name"]
           arguments = params["arguments"]
 
+      if isinstance(tool_name, str) and isinstance(arguments, dict):
+        arguments = self.schema_slimmer.coerce_arguments(
+            tool_name, arguments, stats=self.stats
+        )
+        params["arguments"] = arguments
+
       if self.cache_ttl > 0.0 and isinstance(tool_name, str):
         if _is_read_only_tool(tool_name):
           canonical_args = json.dumps(

@@ -150,6 +150,7 @@ class SlimStats:
   tools_kept: int = 0
   refs_inlined: int = 0
   cache_hits: int = 0
+  args_coerced: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -188,6 +189,7 @@ class SchemaSlimmer:
     self.deny_tools = deny_tools or set()
     self.inline_refs = inline_refs
     self.canonical_sort = canonical_sort
+    self._tool_param_types: dict[str, dict[str, str]] = {}
 
   def _resolve_ref(
       self,
@@ -323,10 +325,76 @@ class SchemaSlimmer:
       )
     input_schema = tool.get("inputSchema")
     if isinstance(input_schema, dict):
-      slimmed["inputSchema"] = self.slim_schema_node(
+      slim_schema = self.slim_schema_node(
           input_schema, is_root=True, stats=stats
       )
+      slimmed["inputSchema"] = slim_schema
+      if isinstance(slim_schema, dict) and isinstance(
+          slim_schema.get("properties"), dict
+      ):
+        param_map: dict[str, str] = {}
+        for p_name, p_spec in slim_schema["properties"].items():
+          if isinstance(p_spec, dict) and isinstance(p_spec.get("type"), str):
+            param_map[p_name] = p_spec["type"]
+        self._tool_param_types[tool["name"]] = param_map
     return slimmed
+
+  def coerce_arguments(
+      self,
+      tool_name: str,
+      arguments: dict[str, Any],
+      stats: SlimStats | None = None,
+  ) -> dict[str, Any]:
+    """Coerces stringified scalar/JSON arguments using the cached tool inputSchema."""
+    if not isinstance(arguments, dict):
+      return arguments
+    expected_map = self._tool_param_types.get(tool_name)
+    if not expected_map:
+      return arguments
+
+    out = dict(arguments)
+    for k, v in out.items():
+      if not isinstance(v, str):
+        continue
+      expected = expected_map.get(k)
+      if expected == "integer":
+        stripped = v.strip()
+        if re.fullmatch(r"[+-]?\d+", stripped):
+          out[k] = int(stripped)
+          if stats is not None:
+            stats.args_coerced += 1
+      elif expected == "number":
+        stripped = v.strip()
+        try:
+          val = float(stripped)
+          if math.isfinite(val):
+            out[k] = val
+            if stats is not None:
+              stats.args_coerced += 1
+        except ValueError:
+          pass
+      elif expected == "boolean":
+        lower = v.strip().lower()
+        if lower in ("true", "false"):
+          out[k] = lower == "true"
+          if stats is not None:
+            stats.args_coerced += 1
+      elif expected in ("array", "object"):
+        stripped = v.strip()
+        if (expected == "array" and stripped.startswith("[") and stripped.endswith("]")) or (
+            expected == "object" and stripped.startswith("{") and stripped.endswith("}")
+        ):
+          try:
+            parsed = json.loads(stripped)
+            if (expected == "array" and isinstance(parsed, list)) or (
+                expected == "object" and isinstance(parsed, dict)
+            ):
+              out[k] = parsed
+              if stats is not None:
+                stats.args_coerced += 1
+          except json.JSONDecodeError:
+            pass
+    return out
 
   def slim_tools_list(
       self, tools: list[dict[str, Any]], stats: SlimStats | None = None
@@ -598,6 +666,8 @@ class OutputSlimmer:
       except (json.JSONDecodeError, TypeError):
         pass
     cleaned = _WHITESPACE_RUN.sub(" ", cleaned)
+    cleaned = re.sub(r"\|[\s:-]*-{3,}[\s:-]*(?=\|)", "|---", cleaned)
+    cleaned = re.sub(r"\|\s+([^|\n]+?)\s+(?=\|)", r"|\1", cleaned)
     cleaned = _BLANK_LINES.sub("\n\n", cleaned)
     if len(cleaned) > self.max_string_chars:
       cleaned = (
