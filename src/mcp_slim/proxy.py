@@ -8,7 +8,7 @@ import sys
 from typing import Any
 
 from .guard import SecretGuard
-from .slimmer import OutputSlimmer, SchemaSlimmer, SlimStats
+from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
 
 
 class MCPProxy:
@@ -19,17 +19,32 @@ class MCPProxy:
       schema_slimmer: SchemaSlimmer | None = None,
       output_slimmer: OutputSlimmer | None = None,
       secret_guard: SecretGuard | None = None,
+      lazy: bool = False,
       quiet: bool = False,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
     self.secret_guard = secret_guard or SecretGuard()
+    self.lazy = lazy
+    self.lazy_broker = (
+        LazyToolBroker(schema_slimmer=self.schema_slimmer) if lazy else None
+    )
     self.stats = SlimStats()
     self.quiet = quiet
     self._pending_methods: dict[str | int, str] = {}
+    self._local_responses: list[str] = []
+
+  def pop_local_responses(self) -> list[str]:
+    """Returns any locally synthesized JSON-RPC responses (e.g. from mcp_search_tools)."""
+    items = list(self._local_responses)
+    self._local_responses.clear()
+    return items
 
   def process_client_message(self, raw_line: str) -> str:
-    """Processes a client -> server JSON-RPC line."""
+    """Processes a client -> server JSON-RPC line.
+
+    Returns an empty string when the request was handled locally by `LazyToolBroker`.
+    """
     try:
       msg = json.loads(raw_line)
     except json.JSONDecodeError:
@@ -39,10 +54,49 @@ class MCPProxy:
 
     msg_id = msg.get("id")
     method = msg.get("method")
+    params = msg.get("params")
+
+    if method == "tools/call" and isinstance(params, dict):
+      tool_name = params.get("name")
+      arguments = params.get("arguments") or {}
+
+      if self.lazy_broker is not None and tool_name == LazyToolBroker.SEARCH_TOOL_NAME:
+        query = str(arguments.get("query", "")) if isinstance(arguments, dict) else ""
+        limit = int(arguments.get("limit", 5)) if isinstance(arguments, dict) else 5
+        search_res = self.lazy_broker.search(query=query, limit=limit)
+        payload = {
+            "jsonrpc": msg.get("jsonrpc", "2.0"),
+            "id": msg_id,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            search_res, ensure_ascii=False, separators=(",", ":")
+                        ),
+                    }
+                ],
+                "isError": False,
+            },
+        }
+        self._local_responses.append(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
+        return ""
+
+      if self.lazy_broker is not None and tool_name == LazyToolBroker.CALL_TOOL_NAME:
+        if isinstance(arguments, dict) and isinstance(arguments.get("tool_name"), str):
+          params["name"] = arguments["tool_name"]
+          params["arguments"] = (
+              arguments.get("arguments")
+              if isinstance(arguments.get("arguments"), dict)
+              else {}
+          )
+
     if msg_id is not None and isinstance(method, str):
       self._pending_methods[msg_id] = method
 
-    if method == "tools/call" and isinstance(msg.get("params"), dict):
+    if method == "tools/call" and isinstance(params, dict):
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
       return self.secret_guard.redact_text(serialized) + "\n"
 
@@ -58,16 +112,23 @@ class MCPProxy:
       return raw_line
 
     msg_id = msg.get("id")
-    method = self._pending_methods.pop(msg_id, None) if msg_id is not None else None
+    method = (
+        self._pending_methods.pop(msg_id, None) if msg_id is not None else None
+    )
     result = msg.get("result")
 
     if isinstance(result, dict):
       if method == "tools/list" or isinstance(result.get("tools"), list):
         tools = result.get("tools")
         if isinstance(tools, list):
-          result["tools"] = self.schema_slimmer.slim_tools_list(
-              tools, stats=self.stats
-          )
+          if self.lazy_broker is not None:
+            result["tools"] = self.lazy_broker.ingest_tools(
+                tools, stats=self.stats
+            )
+          else:
+            result["tools"] = self.schema_slimmer.slim_tools_list(
+                tools, stats=self.stats
+            )
       elif method == "tools/call" or isinstance(result.get("content"), list):
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
       msg["result"] = result
@@ -98,9 +159,15 @@ class MCPProxy:
           line = await reader.readline()
           if not line:
             break
-          processed = self.process_client_message(line.decode("utf-8", errors="replace"))
-          proc.stdin.write(processed.encode("utf-8"))
-          await proc.stdin.drain()
+          processed = self.process_client_message(
+              line.decode("utf-8", errors="replace")
+          )
+          for local_reply in self.pop_local_responses():
+            sys.stdout.write(local_reply)
+            sys.stdout.flush()
+          if processed:
+            proc.stdin.write(processed.encode("utf-8"))
+            await proc.stdin.drain()
       except (BrokenPipeError, ConnectionResetError):
         pass
       finally:
@@ -115,7 +182,9 @@ class MCPProxy:
           line = await proc.stdout.readline()
           if not line:
             break
-          processed = self.process_server_message(line.decode("utf-8", errors="replace"))
+          processed = self.process_server_message(
+              line.decode("utf-8", errors="replace")
+          )
           sys.stdout.write(processed)
           sys.stdout.flush()
       except (BrokenPipeError, ConnectionResetError):

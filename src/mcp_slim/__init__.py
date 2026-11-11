@@ -1,15 +1,18 @@
-"""mcp-slim: Zero-config MCP proxy that cuts token usage by 60-80% and redacts leaked secrets."""
+"""mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "0.1.0"
-
-from .guard import SecretGuard, RedactionReport
-from .slimmer import SchemaSlimmer, OutputSlimmer, SlimStats
+from .guard import RedactionReport, SecretGuard
+from .proxy import MCPProxy
+from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats, estimate_tokens
 
 __all__ = [
-    "__version__",
-    "SecretGuard",
+    "LazyToolBroker",
+    "MCPProxy",
+    "OutputSlimmer",
     "RedactionReport",
     "SchemaSlimmer",
-    "OutputSlimmer",
+    "SecretGuard",
     "SlimStats",
+    "estimate_tokens",
 ]
+
+__version__ = "0.2.0"

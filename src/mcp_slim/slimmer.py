@@ -1,10 +1,11 @@
-"""Schema and tool-output compaction engine for MCP JSON-RPC traffic."""
+"""Schema compaction, $ref inlining, and lazy meta-tool broker for MCP JSON-RPC traffic."""
 
 from __future__ import annotations
 
-import copy
 from dataclasses import dataclass
+import fnmatch
 import json
+import math
 import re
 from typing import Any
 
@@ -61,6 +62,17 @@ _STOP_WORDS = frozenset({
     "whether",
 })
 
+_REDUNDANT_SCHEMA_KEYS = frozenset({
+    "$schema",
+    "$id",
+    "$defs",
+    "definitions",
+    "additionalProperties",
+    "title",
+    "examples",
+    "default",
+})
+
 
 def _is_redundant_param_description(prop_name: str, desc: str) -> bool:
   """Returns True when `desc` only restates `prop_name` using filler words."""
@@ -74,14 +86,16 @@ def _is_redundant_param_description(prop_name: str, desc: str) -> bool:
     allowed_words.add(part + "s")
     allowed_words.update(_ABBREV_EXPANSIONS.get(part, ()))
   return all(w in allowed_words for w in norm_desc_words)
-_REDUNDANT_SCHEMA_KEYS = frozenset({
-    "$schema",
-    "$id",
-    "additionalProperties",
-    "title",
-    "examples",
-    "default",
-})
+
+
+def _matches_any_pattern(name: str, patterns: set[str]) -> bool:
+  """Matches tool name against exact strings or wildcard glob patterns (e.g. 'get_*')."""
+  if name in patterns:
+    return True
+  for pat in patterns:
+    if ("*" in pat or "?" in pat or "[" in pat) and fnmatch.fnmatchcase(name, pat):
+      return True
+  return False
 
 
 def estimate_tokens(obj: Any) -> int:
@@ -101,7 +115,6 @@ def compact_description(
     return ""
   cleaned = " ".join(text.strip().split())
   if keep_first_sentence:
-    # Split at first period/newline that ends a sentence (ignoring e.g. / i.e. / v1.0).
     match = re.search(r"(?<![e]\.[g])(?<![i]\.[e])(?<!\d)\.\s+", cleaned)
     if match and match.start() + 1 >= 16:
       cleaned = cleaned[: match.start() + 1]
@@ -120,6 +133,7 @@ class SlimStats:
   output_tokens_after: int = 0
   tools_total: int = 0
   tools_kept: int = 0
+  refs_inlined: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -141,7 +155,7 @@ class SlimStats:
 
 
 class SchemaSlimmer:
-  """Minifies MCP `tools/list` schemas without altering tool names or required parameters."""
+  """Minifies MCP `tools/list` schemas and inlines `$defs`/`$ref` for cross-LLM compatibility."""
 
   def __init__(
       self,
@@ -149,29 +163,86 @@ class SchemaSlimmer:
       max_param_desc_chars: int = 80,
       allow_tools: set[str] | None = None,
       deny_tools: set[str] | None = None,
+      inline_refs: bool = True,
   ) -> None:
     self.max_desc_chars = max_desc_chars
     self.max_param_desc_chars = max_param_desc_chars
     self.allow_tools = allow_tools
     self.deny_tools = deny_tools or set()
+    self.inline_refs = inline_refs
 
-  def slim_schema_node(self, node: Any, is_root: bool = False) -> Any:
+  def _resolve_ref(
+      self,
+      ref_str: str,
+      defs: dict[str, Any],
+      visited: frozenset[str],
+      stats: SlimStats | None = None,
+  ) -> dict[str, Any] | None:
+    for prefix in ("#/$defs/", "#/definitions/"):
+      if ref_str.startswith(prefix):
+        def_name = ref_str[len(prefix) :]
+        if def_name in visited:
+          return {"type": "object"}
+        target = defs.get(def_name)
+        if isinstance(target, dict):
+          if stats is not None:
+            stats.refs_inlined += 1
+          return self.slim_schema_node(
+              target,
+              is_root=False,
+              defs=defs,
+              visited=visited | {def_name},
+              stats=stats,
+          )
+    return None
+
+  def slim_schema_node(
+      self,
+      node: Any,
+      is_root: bool = False,
+      defs: dict[str, Any] | None = None,
+      visited: frozenset[str] = frozenset(),
+      stats: SlimStats | None = None,
+  ) -> Any:
     if not isinstance(node, dict):
       return node
+
+    if defs is None:
+      defs = {}
+      if isinstance(node.get("$defs"), dict):
+        defs.update(node["$defs"])
+      if isinstance(node.get("definitions"), dict):
+        defs.update(node["definitions"])
+
+    if self.inline_refs and "$ref" in node and isinstance(node["$ref"], str):
+      resolved = self._resolve_ref(node["$ref"], defs, visited, stats=stats)
+      if resolved is not None:
+        merged = dict(resolved)
+        for k, v in node.items():
+          if k != "$ref" and k not in _REDUNDANT_SCHEMA_KEYS:
+            if k == "description" and isinstance(v, str):
+              compact = compact_description(v, max_chars=self.max_param_desc_chars)
+              if compact:
+                merged[k] = compact
+            else:
+              merged[k] = v
+        return merged
+
     out: dict[str, Any] = {}
     for k, v in node.items():
       if k in _REDUNDANT_SCHEMA_KEYS:
         continue
       if k == "description" and isinstance(v, str):
         compact = compact_description(v, max_chars=self.max_param_desc_chars)
-        # Drop trivial descriptions that merely repeat the property name.
         if compact:
           out[k] = compact
         continue
       if k == "properties" and isinstance(v, dict):
         props: dict[str, Any] = {}
         for prop_name, prop_schema in v.items():
-          slimmed_prop = self.slim_schema_node(prop_schema, is_root=False)
+          slimmed_prop = self.slim_schema_node(
+              prop_schema, is_root=False, defs=defs, visited=visited, stats=stats
+          )
           if isinstance(slimmed_prop, dict):
             desc = slimmed_prop.get("description", "")
             if desc and _is_redundant_param_description(prop_name, desc):
@@ -180,22 +251,30 @@ class SchemaSlimmer:
         out[k] = props
         continue
       if k == "items" and isinstance(v, dict):
-        out[k] = self.slim_schema_node(v, is_root=False)
+        out[k] = self.slim_schema_node(
+            v, is_root=False, defs=defs, visited=visited, stats=stats
+        )
         continue
       if k in ("anyOf", "oneOf", "allOf") and isinstance(v, list):
-        # Simplify nullable union `anyOf: [{type: X}, {type: null}]` -> `type: X`
         non_null = [
             branch
             for branch in v
             if not (isinstance(branch, dict) and branch.get("type") == "null")
         ]
         if len(non_null) == 1 and isinstance(non_null[0], dict):
-          merged = self.slim_schema_node(non_null[0], is_root=False)
+          merged = self.slim_schema_node(
+              non_null[0], is_root=False, defs=defs, visited=visited, stats=stats
+          )
           if isinstance(merged, dict):
             for mk, mv in merged.items():
               out.setdefault(mk, mv)
           continue
-        out[k] = [self.slim_schema_node(branch, is_root=False) for branch in v]
+        out[k] = [
+            self.slim_schema_node(
+                branch, is_root=False, defs=defs, visited=visited, stats=stats
+            )
+            for branch in v
+        ]
         continue
       if k == "required" and isinstance(v, list) and not v:
         continue
@@ -204,7 +283,16 @@ class SchemaSlimmer:
       out["type"] = "object"
     return out
 
-  def slim_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
+  def is_tool_allowed(self, name: str) -> bool:
+    if self.allow_tools is not None and not _matches_any_pattern(name, self.allow_tools):
+      return False
+    if self.deny_tools and _matches_any_pattern(name, self.deny_tools):
+      return False
+    return True
+
+  def slim_tool(
+      self, tool: dict[str, Any], stats: SlimStats | None = None
+  ) -> dict[str, Any]:
     slimmed: dict[str, Any] = {"name": tool["name"]}
     desc = tool.get("description")
     if isinstance(desc, str) and desc.strip():
@@ -213,7 +301,9 @@ class SchemaSlimmer:
       )
     input_schema = tool.get("inputSchema")
     if isinstance(input_schema, dict):
-      slimmed["inputSchema"] = self.slim_schema_node(input_schema, is_root=True)
+      slimmed["inputSchema"] = self.slim_schema_node(
+          input_schema, is_root=True, stats=stats
+      )
     return slimmed
 
   def slim_tools_list(
@@ -223,11 +313,9 @@ class SchemaSlimmer:
     filtered: list[dict[str, Any]] = []
     for tool in tools:
       name = tool.get("name", "")
-      if self.allow_tools is not None and name not in self.allow_tools:
+      if not self.is_tool_allowed(name):
         continue
-      if name in self.deny_tools:
-        continue
-      filtered.append(self.slim_tool(tool))
+      filtered.append(self.slim_tool(tool, stats=stats))
     if stats is not None:
       after_tokens = estimate_tokens(filtered)
       stats.tools_total += len(tools)
@@ -235,6 +323,154 @@ class SchemaSlimmer:
       stats.schema_tokens_before += before_tokens
       stats.schema_tokens_after += after_tokens
     return filtered
+
+
+class LazyToolBroker:
+  """On-demand MCP meta-tool discovery broker (`--lazy` mode).
+
+  Replaces large `tools/list` catalogs (40-100+ tools) with two compact meta-tools
+  (`mcp_search_tools` and `mcp_call_tool`), cutting static schema context consumption
+  by ~98% while allowing the LLM to search and invoke any upstream tool on demand.
+  """
+
+  SEARCH_TOOL_NAME = "mcp_search_tools"
+  CALL_TOOL_NAME = "mcp_call_tool"
+
+  def __init__(self, schema_slimmer: SchemaSlimmer | None = None) -> None:
+    self.schema_slimmer = schema_slimmer or SchemaSlimmer()
+    self._tools_by_name: dict[str, dict[str, Any]] = {}
+    self._doc_tokens: dict[str, list[str]] = {}
+    self._df: dict[str, int] = {}
+
+  @staticmethod
+  def _tokenize(text: str) -> list[str]:
+    return [t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) > 1]
+
+  def ingest_tools(
+      self, raw_tools: list[dict[str, Any]], stats: SlimStats | None = None
+  ) -> list[dict[str, Any]]:
+    """Indexes upstream tools and returns the 2 compact meta-tool definitions."""
+    before_tokens = estimate_tokens(raw_tools) if stats is not None else 0
+    self._tools_by_name.clear()
+    self._doc_tokens.clear()
+    self._df.clear()
+
+    for tool in raw_tools:
+      name = tool.get("name", "")
+      if not name or not self.schema_slimmer.is_tool_allowed(name):
+        continue
+      slimmed = self.schema_slimmer.slim_tool(tool, stats=stats)
+      self._tools_by_name[name] = slimmed
+      props = (
+          slimmed.get("inputSchema", {}).get("properties", {})
+          if isinstance(slimmed.get("inputSchema"), dict)
+          else {}
+      )
+      searchable = " ".join([
+          name.replace("_", " ").replace("-", " "),
+          name,
+          slimmed.get("description", ""),
+          " ".join(props.keys()),
+      ])
+      tokens = self._tokenize(searchable)
+      self._doc_tokens[name] = tokens
+      for unique_tok in set(tokens):
+        self._df[unique_tok] = self._df.get(unique_tok, 0) + 1
+
+    meta_tools = self.meta_tool_definitions()
+    if stats is not None:
+      after_tokens = estimate_tokens(meta_tools)
+      stats.tools_total += len(raw_tools)
+      stats.tools_kept += len(self._tools_by_name)
+      stats.schema_tokens_before += before_tokens
+      stats.schema_tokens_after += after_tokens
+    return meta_tools
+
+  def meta_tool_definitions(self) -> list[dict[str, Any]]:
+    count = len(self._tools_by_name)
+    return [
+        {
+            "name": self.SEARCH_TOOL_NAME,
+            "description": (
+                f"Search {count} available MCP tools by keyword and return their"
+                " input schemas. Pass query='' to list all tool names."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keywords matching tool name or capability.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max tools to return (default 5).",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": self.CALL_TOOL_NAME,
+            "description": (
+                "Invoke any upstream MCP tool discovered via mcp_search_tools by"
+                " passing its exact tool_name and arguments object."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string"},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["tool_name"],
+            },
+        },
+    ]
+
+  def search(self, query: str, limit: int = 5) -> dict[str, Any]:
+    """BM25-ranked search over indexed upstream tools."""
+    limit = max(1, min(limit, 25))
+    q_tokens = self._tokenize(query.replace("_", " ").replace("-", " "))
+    if not q_tokens:
+      catalog = [
+          {"name": name, "description": t.get("description", "")}
+          for name, t in sorted(self._tools_by_name.items())
+      ]
+      return {"total_indexed": len(catalog), "tools": catalog[: max(limit, 20)]}
+
+    n_docs = max(1, len(self._tools_by_name))
+    avgdl = (
+        sum(len(toks) for toks in self._doc_tokens.values()) / n_docs
+        if self._doc_tokens
+        else 1.0
+    )
+    scores: list[tuple[float, str]] = []
+    for name, doc_toks in self._doc_tokens.items():
+      score = 0.0
+      dl = len(doc_toks)
+      if query.lower() in name.lower():
+        score += 4.0
+      for qt in q_tokens:
+        tf = doc_toks.count(qt)
+        if tf == 0:
+          for dt in doc_toks:
+            if dt.startswith(qt) or qt.startswith(dt):
+              tf += 1
+        if tf > 0:
+          df = self._df.get(qt, 1)
+          idf = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+          score += idf * ((tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * (dl / avgdl))))
+      if score > 0.0:
+        scores.append((score, name))
+
+    scores.sort(key=lambda item: (-item[0], item[1]))
+    matched = [self._tools_by_name[name] for _, name in scores[:limit]]
+    return {
+        "query": query,
+        "matched_count": len(matched),
+        "total_indexed": len(self._tools_by_name),
+        "tools": matched,
+    }
 
 
 class OutputSlimmer:

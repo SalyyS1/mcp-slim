@@ -1,6 +1,6 @@
 # mcp-slim
 
-**Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression and Real-Time Secret Redaction**
+**Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% Tokens), Cross-LLM `$ref` Inlining, On-Demand Tool Discovery, and Real-Time Secret Redaction**
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
@@ -12,18 +12,21 @@
 
 ## Overview
 
-When connecting MCP clients (**Claude Code**, **Cursor**, **Windsurf**, **Claude Desktop**, or custom agents) to multiple Model Context Protocol (MCP) servers (`git`, `filesystem`, `postgres`, `github`, `slack`), two structural issues occur on every conversation turn:
+When connecting MCP clients (**Claude Code**, **Cursor**, **Windsurf**, **Claude Desktop**, **LibreChat**, **Cherry Studio**, or custom agents) to multiple Model Context Protocol (MCP) servers (`git`, `filesystem`, `postgres`, `github`, `atlassian`, `slack`), three structural bottlenecks degrade agent reliability on every conversation turn:
 
-1. **Context Window Bloat (14,000–60,000+ tokens per turn):** Auto-generated Pydantic and Zod `tools/list` JSON schemas include `$schema` declarations, redundant `title` fields, verbose multi-sentence descriptions, nullable `anyOf: [{"type": "string"}, {"type": "null"}]` wrappers, and uncompacted `tools/call` JSON responses filled with `null`, `""`, `[]`, and `{}` entries.
-2. **Unfiltered Credential Exposure:** MCP tools reading logs, `.env` files, database rows, or git remotes frequently return raw API keys (`sk-ant-...`, `ghp_...`, `AKIA...`, `xoxb-...`, JWTs, or database DSNs containing passwords) directly into the LLM context window.
+1. **Context Window Bloat & Tool Selection Rot (14,000–60,000+ tokens per turn):** Auto-generated Pydantic and Zod `tools/list` JSON schemas include `$schema` declarations, redundant `title` fields, verbose multi-paragraph descriptions, nullable `anyOf: [{"type": "string"}, {"type": "null"}]` wrappers, and uncompacted `tools/call` JSON responses filled with `null`, `""`, `[]`, and `{}` entries.
+2. **Cross-Provider Schema Rejections (`$defs` / `$ref`):** FastMCP and Pydantic servers emit nested `"$defs"` and `{"$ref": "#/$defs/..."}` pointers inside `inputSchema`, triggering `400 Invalid Argument` errors on Google Gemini, Vertex AI, Azure OpenAI, and local vLLM/Ollama function-calling endpoints.
+3. **Unfiltered Credential Exposure:** MCP tools reading logs, `.env` files, database rows, or git remotes frequently return raw API keys (`sk-ant-...`, `ghp_...`, `AKIA...`, `xoxb-...`, JWTs, or database DSNs containing passwords) directly into the LLM context window.
 
-`mcp-slim` is a transparent, zero-dependency Python 3.10+ stdio proxy that sits between the MCP client and any upstream MCP server (`npx`, `uvx`, `python`, `docker`). It compacts `tools/list` schemas and `tools/call` payloads by **47–52%** while redacting leaked credentials bidirectionally with **sub-millisecond (`~0.93 ms` p50) overhead**.
+`mcp-slim` is a transparent, zero-dependency Python 3.10+ stdio proxy that sits between any MCP client and upstream MCP server (`npx`, `uvx`, `python`, `docker`). It operates in two selectable modes:
+- **Standard Mode (`mcp-slim run -- ...`):** Compacts all exposed `tools/list` schemas and `tools/call` payloads in-place by **47–52%**, inlines `$defs`/`$ref` pointers, and filters tools via exact names or wildcard globs (`--allow-tools "get_*,search_*"`).
+- **Lazy Discovery Mode (`mcp-slim run --lazy -- ...`):** Replaces 40–100+ static tool definitions with 2 lightweight on-demand meta-tools (`mcp_search_tools` with BM25 ranking and `mcp_call_tool`), cutting static `tools/list` schema tokens from `12,512` to `168` (**-98.7%**) on any MCP client.
 
 ```mermaid
 flowchart LR
-    Client["MCP Client\n(Claude Code / Cursor / Windsurf)"]
-    Proxy["mcp-slim Stdio Proxy\n- SchemaSlimmer (-48.8% tokens)\n- OutputSlimmer (-43.0% tokens)\n- SecretGuard (13 rule categories)"]
-    Server["Upstream MCP Server\n(Git / GitHub / Postgres / Filesystem)"]
+    Client["MCP Client\n(Claude Code / Cursor / LibreChat / Gemini)"]
+    Proxy["mcp-slim Stdio Proxy\n- SchemaSlimmer (-48.8% tokens + $ref inliner)\n- LazyToolBroker (--lazy: -98.7% schema tokens)\n- OutputSlimmer (-43.0% tokens)\n- SecretGuard (12 credential categories)"]
+    Server["Upstream MCP Server\n(Git / GitHub / Postgres / Filesystem / Atlassian)"]
 
     Client <-->|"Compacted & Redacted JSON-RPC 2.0"| Proxy
     Proxy <-->|"Raw Upstream JSON-RPC 2.0"| Server
@@ -31,9 +34,24 @@ flowchart LR
 
 ---
 
+## Comparison with Existing Approaches
+
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.2.0`)** |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
+| **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -51.6% tokens)** |
+| **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
+| **Wildcard Glob Tool Filtering (`get_*,search_*`)** | No | Exact names | No | No | **Yes (`--allow-tools` / `--deny-tools`)** |
+| **`$defs` / `$ref` Inlining (Gemini / Vertex / Azure fix)** | No | No | No | No | **Yes (Recursive with cycle guard)** |
+| **`tools/call` JSON & Text Output Compaction** | No | No | No | No | **Yes (-43.0% output tokens)** |
+| **Bidirectional Real-Time Secret Redaction** | No | No | No | No | **Yes (12 categories, `141 µs` p50)** |
+| **Built-In Schema Token Auditor (`mcp-slim audit`)** | No | No | No | No | **Yes** |
+
+---
+
 ## Performance & Compression Benchmarks
 
-All benchmarks are reproducible via [`benchmarks/run_benchmarks.py`](./benchmarks/run_benchmarks.py) against [`benchmarks/fixtures/real_mcp_workload.json`](./benchmarks/fixtures/real_mcp_workload.json) (60 tool definitions across four standard MCP servers plus a 12-item GitHub repository search `tools/call` response containing leaked credentials).
+All benchmarks are reproducible via [`benchmarks/run_benchmarks.py`](./benchmarks/run_benchmarks.py) and `mcp-slim audit benchmarks/fixtures/real_mcp_workload.json` against [`benchmarks/fixtures/real_mcp_workload.json`](./benchmarks/fixtures/real_mcp_workload.json) (60 tool definitions across four standard MCP servers plus a 12-item GitHub repository search `tools/call` response containing leaked credentials).
 
 ### 1. Context Token & Wire-Byte Compression
 
@@ -45,7 +63,8 @@ All benchmarks are reproducible via [`benchmarks/run_benchmarks.py`](./benchmark
 | `mcp-server-filesystem` | 12 | 8,017 B | 3,883 B | 2,005 | 971 | 1,034 | **-51.6%** |
 | `mcp-server-postgres` | 8 | 5,069 B | 2,595 B | 1,268 | 648 | 620 | **-48.9%** |
 | `mcp-server-github` | 26 | 29,323 B | 15,453 B | 7,331 | 3,864 | 3,467 | **-47.3%** |
-| **Combined Workspace (60 tools + `tools/call`)** | **60** | **57,470 B** | **29,438 B** | **14,364** | **7,354** | **7,010** | **-48.8%** |
+| **Combined Workspace (Standard Mode)** | **60** | **57,470 B** | **29,438 B** | **14,364** | **7,354** | **7,010** | **-48.8%** |
+| **Combined `tools/list` (`--lazy` Discovery Mode)** | **60 -> 2** | **50,048 B** | **671 B** | **12,512** | **168** | **12,344** | **-98.7%** |
 
 ### 2. Runtime Latency, Throughput & Memory Footprint
 
@@ -59,12 +78,6 @@ Measured over **N = 5,000 iterations** on Python 3.11 (`linux x86_64`) using `ti
 | `SchemaSlimmer.slim_tools_list` | 14 tools (7,639 B) | **671.1 µs** | 863.8 µs | 949.0 µs | **1,444 msg/s** (10.5 MB/s) | 4.7 KiB |
 | `OutputSlimmer.slim_call_result` | 12-repo JSON output (7,450 B) | **462.7 µs** | 603.6 µs | 654.3 µs | **2,121 msg/s** (15.1 MB/s) | 17.1 KiB |
 | `MCPProxy` Full JSON-RPC Turn | Request + Response + Slim + Guard | **930.6 µs** | 1,209.0 µs | 1,344.8 µs | **1,050 msg/s** (7.6 MB/s) | 24.4 KiB |
-
-To reproduce these measurements and regenerate the SVG charts locally:
-
-```bash
-python3 benchmarks/run_benchmarks.py
-```
 
 ---
 
@@ -80,40 +93,38 @@ pip install git+https://github.com/SalyyS1/mcp-slim.git
 uv tool install git+https://github.com/SalyyS1/mcp-slim.git
 ```
 
-### 2. Wrap Existing MCP Configuration
+### 2. Wrap Existing MCP Configuration (`Standard` or `--lazy`)
 
 Wrap all servers in a Claude Desktop, Claude Code, Cursor, or Windsurf configuration file with a single command:
 
 ```bash
-# Preview modified configuration on stdout:
-mcp-slim wrap ~/.cursor/mcp.json
-
-# Update configuration file in-place:
+# Standard schema slimming (-48.8% tokens):
 mcp-slim wrap -i ~/.cursor/mcp.json
+
+# Or enable On-Demand Lazy Discovery (-98.7% static schema tokens):
+mcp-slim wrap --lazy -i ~/.cursor/mcp.json
 ```
 
-**Before (`mcp.json`):**
-```json
-{
-  "mcpServers": {
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"]
-    }
-  }
-}
+### 3. Audit Any MCP Tool Schema Manifest
+
+```bash
+mcp-slim audit benchmarks/fixtures/real_mcp_workload.json
 ```
 
-**After (`mcp-slim wrap -i mcp.json`):**
-```json
-{
-  "mcpServers": {
-    "github": {
-      "command": "mcp-slim",
-      "args": ["run", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
-    }
-  }
-}
+Output:
+```text
+mcp-slim Schema Audit (60 tools)
+==============================================================================
+TOOL NAME                        |   RAW TOK |  SLIM TOK |     SAVED |   $REF
+------------------------------------------------------------------------------
+git_status                       |        80 |        43 |    -46.2% |     ok
+git_log                          |       272 |       108 |    -60.3% |     ok
+read_file                        |       238 |       110 |    -53.8% |     ok
+... (40 additional tools omitted from row listing)
+------------------------------------------------------------------------------
+Standard SchemaSlimmer : 12512 -> 6470 tokens (-48.3%, inlined 0 $ref definitions)
+Lazy Discovery (--lazy): 12512 -> 168 tokens (-98.7% via 2 on-demand meta-tools)
+==============================================================================
 ```
 
 ---
@@ -121,44 +132,32 @@ mcp-slim wrap -i ~/.cursor/mcp.json
 ## Architecture & Optimization Passes
 
 ### 1. `SchemaSlimmer` (`tools/list`)
+- **Recursive `$defs` / `$ref` Inlining:** Resolves local `#/$defs/...` and `#/definitions/...` JSON pointers inline and removes `$defs` blocks so Pydantic/FastMCP servers work without `400 Invalid Argument` errors on Google Gemini, Vertex AI, and Azure OpenAI.
 - **Metadata Stripping:** Removes `$schema`, `$id`, `title`, `additionalProperties`, `examples`, and `default` fields that do not affect LLM tool invocation accuracy.
-- **Nullable Union Normalization:** Rewrites `{"anyOf": [{"type": "string"}, {"type": "null"}]}` and `{"type": ["string", "null"]}` into `{"type": "string"}` while preserving top-level `required` arrays.
-- **Redundant Description Pruning:** Drops parameter descriptions that merely restate the parameter identifier or parent tool name (for example, `repo_path`: `"The path to the Git repository."`).
-- **Sentence-Boundary Condensation:** Truncates multi-sentence descriptions to their primary clause (configurable via `--max-desc` and `--max-param-desc`).
-- **Tool Allowlisting and Denylisting:** Filter exposed tools at the proxy boundary via `--allow-tools` or `--deny-tools`:
+- **Nullable Union Normalization:** Rewrites `{"anyOf": [{"type": "string"}, {"type": "null"}]}` into `{"type": "string"}` while preserving top-level `required` arrays.
+- **Redundant Description Pruning:** Drops parameter descriptions that merely restate the parameter identifier (`repo_path`: `"The path to the Git repository."`).
+- **Sentence-Boundary Condensation:** Truncates multi-sentence descriptions to their primary clause (`--max-desc` and `--max-param-desc`).
+- **Wildcard Glob Allowlisting and Denylisting:** Filter exposed tools at the proxy boundary via exact names or globs (`--allow-tools` / `--deny-tools`):
 
 ```bash
-mcp-slim run --allow-tools search_repositories,get_file_contents -- npx -y @modelcontextprotocol/server-github
+mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- npx -y @modelcontextprotocol/server-github
 ```
 
-### 2. `OutputSlimmer` (`tools/call`)
+### 2. `LazyToolBroker` (`--lazy` On-Demand Meta-Tool Discovery)
+- Intercepts `tools/list`, indexes all allowed upstream tools in memory, and exposes only two compact meta-tools (`mcp_search_tools` and `mcp_call_tool`, `168` tokens total).
+- Answers `mcp_search_tools(query, limit)` locally inside the proxy in `<0.1 ms` using BM25 ranking over tool names, descriptions, and parameter keys.
+- Rewrites `mcp_call_tool(tool_name, arguments)` directly into native upstream `tools/call` JSON-RPC requests.
+
+### 3. `OutputSlimmer` (`tools/call`)
 - **JSON Compaction and Empty-Value Pruning:** Parses JSON strings inside `content[].text`, recursively removes keys with `null`, `""`, `[]`, or `{}` values, and re-serializes without indentation whitespace.
-- **ANSI Escape Removal:** Strips terminal color and cursor control sequences from CLI output.
-- **Collection and Text Bounding:** Caps oversized arrays (`max_list_items=50`) and multi-megabyte text payloads (`max_text_chars=16000`) with explicit truncation markers.
+- **ANSI Escape Removal & Collection Bounding:** Strips terminal escape sequences and caps oversized arrays/strings with explicit truncation markers.
 
-### 3. `SecretGuard` (Bidirectional Credential Redaction)
-Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions (`sre` Boyer-Moore `fastsearch`) to scan both outgoing `tools/call` arguments and incoming `tools/call` results:
-
-| Credential Category | Pattern Prefix / Structure | Redaction Replacement |
-| :--- | :--- | :--- |
-| Anthropic API Keys | `sk-ant-api03-...`, `sk-ant-admin01-...` | `[REDACTED:ANTHROPIC_KEY]` |
-| OpenAI API & Project Keys | `sk-proj-...`, `sk-...T3BlbkFJ...` | `[REDACTED:OPENAI_KEY]` |
-| GitHub PAT & Fine-Grained Tokens | `ghp_...`, `gho_...`, `ghs_...`, `github_pat_...` | `[REDACTED:GITHUB_TOKEN]` |
-| AWS Access Key IDs | `AKIA...`, `ASIA...`, `ABIA...`, `ACCA...` | `[REDACTED:AWS_ACCESS_KEY]` |
-| Google Cloud API Keys | `AIza...` | `[REDACTED:GCP_API_KEY]` |
-| Slack Bot & User Tokens | `xoxb-...`, `xoxp-...`, `xoxa-...`, `xoxr-...` | `[REDACTED:SLACK_TOKEN]` |
-| Stripe Live & Restricted Keys | `sk_live_...`, `rk_live_...`, `sk_test_...` | `[REDACTED:STRIPE_KEY]` |
-| HuggingFace User Access Tokens | `hf_...` | `[REDACTED:HF_TOKEN]` |
-| PEM / OpenSSH Private Keys | `-----BEGIN ... PRIVATE KEY-----` | `[REDACTED:PRIVATE_KEY_BLOCK]` |
-| JSON Web Tokens (JWT) | `eyJ...` (3-segment base64url) | `[REDACTED:JWT_TOKEN]` |
-| URI Userinfo Passwords | `://user:password@host` | `[REDACTED:URL_SECRET]` |
-| Environment Variable Secrets | `API_KEY=...`, `DB_PASSWORD=...`, `CLIENT_SECRET=...` | `[REDACTED:ENV_SECRET]` |
+### 4. `SecretGuard` (Bidirectional Credential Redaction)
+Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/call` results across 12 credential categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, and env secrets).
 
 ---
 
 ## Testing
-
-Run the unit test suite and benchmark verification:
 
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -167,12 +166,12 @@ python3 benchmarks/run_benchmarks.py
 
 ---
 
-## License
-
-Released under the [MIT License](./LICENSE).
-
----
-
 ## Related AI Infrastructure Projects by [@SalyyS1](https://github.com/SalyyS1)
 
 - **[loraspectra](https://github.com/SalyyS1/loraspectra)** — Zero-dependency Rust engine & CLI for auditing spectral rank collapse, dynamically compressing `.safetensors` LoRA adapters by **-83.8%** at **99% Frobenius energy**, and merging conflicting adapters via QR-Core Orthogonal Subspace Projection (`1,050x–2,680x` faster than dense SVD).
+
+---
+
+## License
+
+Released under the [MIT License](./LICENSE).

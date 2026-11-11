@@ -10,7 +10,7 @@ import unittest
 from mcp_slim.cli import SAMPLE_BENCHMARK_OUTPUT, SAMPLE_BENCHMARK_TOOLS, main, wrap_config
 from mcp_slim.guard import SecretGuard
 from mcp_slim.proxy import MCPProxy
-from mcp_slim.slimmer import OutputSlimmer, SchemaSlimmer, SlimStats
+from mcp_slim.slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
 
 
 class TestSchemaSlimmer(unittest.TestCase):
@@ -22,32 +22,54 @@ class TestSchemaSlimmer(unittest.TestCase):
     self.assertEqual(len(slimmed), 2)
     self.assertLess(stats.schema_tokens_after, stats.schema_tokens_before)
     self.assertGreater(stats.reduction_pct, 45.0)
+    self.assertGreaterEqual(stats.refs_inlined, 1)
 
     first_schema = slimmed[0]["inputSchema"]
     self.assertNotIn("$schema", first_schema)
     self.assertNotIn("title", first_schema)
     self.assertNotIn("additionalProperties", first_schema)
+    self.assertNotIn("$defs", first_schema)
 
     props = first_schema["properties"]
-    # Redundant descriptions ("The repo", "The content", "The branch") should be stripped
     self.assertNotIn("description", props["repo"])
     self.assertNotIn("description", props["content"])
     self.assertNotIn("description", props["branch"])
-    # Meaningful description kept & condensed to first sentence
     self.assertIn("description", props["owner"])
     self.assertEqual(props["owner"]["description"], "The owner of the repository.")
-    # Nullable anyOf simplified to direct type
     self.assertEqual(props["sha"]["type"], "string")
     self.assertNotIn("anyOf", props["sha"])
 
-  def test_allow_and_deny_tool_filters(self) -> None:
-    allow_slimmer = SchemaSlimmer(allow_tools={"search_repositories"})
+    # Verify $ref was inlined into properties["author"] for Gemini/Vertex compatibility
+    self.assertEqual(props["author"]["type"], "object")
+    self.assertIn("name", props["author"]["properties"])
+    self.assertNotIn("$ref", props["author"])
+
+  def test_allow_and_deny_tool_filters_and_globs(self) -> None:
+    allow_slimmer = SchemaSlimmer(allow_tools={"search_*"})
     allowed = allow_slimmer.slim_tools_list(SAMPLE_BENCHMARK_TOOLS)
     self.assertEqual([t["name"] for t in allowed], ["search_repositories"])
 
-    deny_slimmer = SchemaSlimmer(deny_tools={"search_repositories"})
+    deny_slimmer = SchemaSlimmer(deny_tools={"create_*"})
     denied = deny_slimmer.slim_tools_list(SAMPLE_BENCHMARK_TOOLS)
-    self.assertEqual([t["name"] for t in denied], ["create_or_update_file"])
+    self.assertEqual([t["name"] for t in denied], ["search_repositories"])
+
+
+class TestLazyToolBroker(unittest.TestCase):
+  def test_lazy_broker_replaces_catalog_and_searches_tools(self) -> None:
+    broker = LazyToolBroker()
+    stats = SlimStats()
+    meta_tools = broker.ingest_tools(SAMPLE_BENCHMARK_TOOLS, stats=stats)
+    self.assertEqual(len(meta_tools), 2)
+    self.assertEqual(meta_tools[0]["name"], "mcp_search_tools")
+    self.assertEqual(meta_tools[1]["name"], "mcp_call_tool")
+
+    res = broker.search("commit branch file")
+    self.assertGreaterEqual(res["matched_count"], 1)
+    self.assertEqual(res["tools"][0]["name"], "create_or_update_file")
+
+    # Empty query lists catalog summaries
+    all_res = broker.search("")
+    self.assertEqual(all_res["total_indexed"], 2)
 
 
 class TestOutputSlimmer(unittest.TestCase):
@@ -115,12 +137,10 @@ class TestMCPProxyAndCLI(unittest.TestCase):
   def test_proxy_end_to_end_jsonrpc_flow(self) -> None:
     proxy = MCPProxy(quiet=True)
 
-    # 1. Client -> Server: tools/list request
     req_line = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     processed_req = proxy.process_client_message(req_line)
     self.assertIn('"tools/list"', processed_req)
 
-    # 2. Server -> Client: tools/list response
     resp_line = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "result": {"tools": SAMPLE_BENCHMARK_TOOLS}}
     )
@@ -128,7 +148,6 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertEqual(len(processed_resp["result"]["tools"]), 2)
     self.assertNotIn("$schema", processed_resp["result"]["tools"][0]["inputSchema"])
 
-    # 3. Server -> Client: tools/call response with secret
     call_req = json.dumps(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "search"}}
     )
@@ -139,6 +158,57 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     processed_call_resp = proxy.process_server_message(call_resp)
     self.assertIn("[REDACTED:GITHUB_TOKEN]", processed_call_resp)
     self.assertNotIn("ghp_1234567890abcdefghijklmnopqrstuvwx", processed_call_resp)
+
+  def test_proxy_lazy_mode_search_and_call_rewrite(self) -> None:
+    proxy = MCPProxy(lazy=True, quiet=True)
+    proxy.process_client_message(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    )
+    list_resp = json.loads(
+        proxy.process_server_message(
+            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"tools": SAMPLE_BENCHMARK_TOOLS}})
+        )
+    )
+    self.assertEqual(
+        [t["name"] for t in list_resp["result"]["tools"]],
+        ["mcp_search_tools", "mcp_call_tool"],
+    )
+
+    # Local search request is answered directly without forwarding upstream
+    forwarded = proxy.process_client_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "mcp_search_tools", "arguments": {"query": "search repositories"}},
+        })
+    )
+    self.assertEqual(forwarded, "")
+    local_replies = proxy.pop_local_responses()
+    self.assertEqual(len(local_replies), 1)
+    search_payload = json.loads(
+        json.loads(local_replies[0])["result"]["content"][0]["text"]
+    )
+    self.assertEqual(search_payload["tools"][0]["name"], "search_repositories")
+
+    # mcp_call_tool is rewritten to the upstream tool name
+    rewritten_str = proxy.process_client_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "mcp_call_tool",
+                "arguments": {
+                    "tool_name": "search_repositories",
+                    "arguments": {"query": "mcp-slim"},
+                },
+            },
+        })
+    )
+    rewritten = json.loads(rewritten_str)
+    self.assertEqual(rewritten["params"]["name"], "search_repositories")
+    self.assertEqual(rewritten["params"]["arguments"], {"query": "mcp-slim"})
 
   def test_wrap_config_command(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -165,8 +235,9 @@ class TestMCPProxyAndCLI(unittest.TestCase):
           gh["args"], ["run", "--", "npx", "-y", "@modelcontextprotocol/server-github"]
       )
 
-  def test_cli_benchmark_exits_zero(self) -> None:
+  def test_cli_benchmark_and_audit_exit_zero(self) -> None:
     self.assertEqual(main(["benchmark"]), 0)
+    self.assertEqual(main(["audit"]), 0)
 
 
 if __name__ == "__main__":

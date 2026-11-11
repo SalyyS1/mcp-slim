@@ -12,7 +12,13 @@ from typing import Any
 from . import __version__
 from .guard import SecretGuard
 from .proxy import MCPProxy
-from .slimmer import OutputSlimmer, SchemaSlimmer, SlimStats
+from .slimmer import (
+    LazyToolBroker,
+    OutputSlimmer,
+    SchemaSlimmer,
+    SlimStats,
+    estimate_tokens,
+)
 
 SAMPLE_BENCHMARK_TOOLS: list[dict[str, Any]] = [
     {
@@ -29,6 +35,18 @@ SAMPLE_BENCHMARK_TOOLS: list[dict[str, Any]] = [
             "title": "CreateOrUpdateFileInput",
             "type": "object",
             "additionalProperties": False,
+            "$defs": {
+                "CommitAuthor": {
+                    "title": "CommitAuthor",
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "name": {"title": "Name", "type": "string", "description": "The name"},
+                        "email": {"title": "Email", "type": "string", "description": "The email"},
+                    },
+                    "required": ["name", "email"],
+                }
+            },
             "properties": {
                 "owner": {
                     "title": "Owner",
@@ -76,6 +94,10 @@ SAMPLE_BENCHMARK_TOOLS: list[dict[str, Any]] = [
                         "The blob SHA of the file being replaced. Required only when "
                         "updating an existing file."
                     ),
+                },
+                "author": {
+                    "$ref": "#/$defs/CommitAuthor",
+                    "description": "Optional commit author metadata.",
                 },
             },
             "required": ["owner", "repo", "path", "content", "message", "branch"],
@@ -199,7 +221,79 @@ def run_benchmark() -> int:
   return 0
 
 
-def wrap_config(config_path: Path, in_place: bool = False) -> int:
+def run_audit(path: Path | None = None) -> int:
+  if path is not None:
+    raw_data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw_data, list):
+      tools = raw_data
+    elif isinstance(raw_data, dict) and isinstance(raw_data.get("tools"), list):
+      tools = raw_data["tools"]
+    elif isinstance(raw_data, dict) and isinstance(raw_data.get("servers"), dict):
+      tools = [
+          t
+          for srv_tools in raw_data["servers"].values()
+          if isinstance(srv_tools, list)
+          for t in srv_tools
+      ]
+    else:
+      sys.stderr.write(f"Could not locate a tools list inside {path}\n")
+      return 1
+  else:
+    tools = SAMPLE_BENCHMARK_TOOLS
+
+  slimmer = SchemaSlimmer()
+  stats_std = SlimStats()
+  slimmed_tools = slimmer.slim_tools_list(tools, stats=stats_std)
+
+  broker = LazyToolBroker(schema_slimmer=slimmer)
+  stats_lazy = SlimStats()
+  broker.ingest_tools(tools, stats=stats_lazy)
+
+  print(f"mcp-slim Schema Audit ({len(tools)} tools)")
+  print("=" * 78)
+  print(f"{'TOOL NAME':<32} | {'RAW TOK':>9} | {'SLIM TOK':>9} | {'SAVED':>9} | {'$REF':>6}")
+  print("-" * 78)
+  for raw_t, slim_t in zip(tools[:20], slimmed_tools[:20]):
+    r_tok = estimate_tokens(raw_t)
+    s_tok = estimate_tokens(slim_t)
+    pct = round(((r_tok - s_tok) / max(1, r_tok)) * 100.0, 1)
+    has_ref = "$defs" in json.dumps(raw_t) or "$ref" in json.dumps(raw_t)
+    print(
+        f"{raw_t.get('name', ''):<32.32} | {r_tok:>9} | {s_tok:>9} |"
+        f" {f'-{pct}%':>9} | {'FIXED' if has_ref else 'ok':>6}"
+    )
+  if len(tools) > 20:
+    print(f"... ({len(tools) - 20} additional tools omitted from row listing)")
+  print("-" * 78)
+  std_pct = round(
+      ((stats_std.schema_tokens_before - stats_std.schema_tokens_after)
+       / max(1, stats_std.schema_tokens_before))
+      * 100.0,
+      1,
+  )
+  lazy_pct = round(
+      ((stats_lazy.schema_tokens_before - stats_lazy.schema_tokens_after)
+       / max(1, stats_lazy.schema_tokens_before))
+      * 100.0,
+      1,
+  )
+  print(
+      f"Standard SchemaSlimmer : {stats_std.schema_tokens_before} ->"
+      f" {stats_std.schema_tokens_after} tokens (-{std_pct}%,"
+      f" inlined {stats_std.refs_inlined} $ref definitions)"
+  )
+  print(
+      f"Lazy Discovery (--lazy): {stats_lazy.schema_tokens_before} ->"
+      f" {stats_lazy.schema_tokens_after} tokens (-{lazy_pct}% via 2 on-demand"
+      " meta-tools)"
+  )
+  print("=" * 78)
+  return 0
+
+
+def wrap_config(
+    config_path: Path, in_place: bool = False, lazy: bool = False
+) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
   if not isinstance(servers, dict):
@@ -215,7 +309,8 @@ def wrap_config(config_path: Path, in_place: bool = False) -> int:
     if not isinstance(cmd, str) or cmd == "mcp-slim":
       continue
     spec["command"] = "mcp-slim"
-    spec["args"] = ["run", "--", cmd, *(args if isinstance(args, list) else [])]
+    prefix = ["run", "--lazy", "--"] if lazy else ["run", "--"]
+    spec["args"] = [*prefix, cmd, *(args if isinstance(args, list) else [])]
     wrapped_count += 1
 
   formatted = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
@@ -230,15 +325,14 @@ def wrap_config(config_path: Path, in_place: bool = False) -> int:
 def main(argv: list[str] | None = None) -> int:
   args_list = list(sys.argv[1:] if argv is None else argv)
 
-  # Allow shorthand `mcp-slim -- <cmd> [args...]`
   if args_list and args_list[0] == "--":
     args_list = ["run", *args_list]
 
   parser = argparse.ArgumentParser(
       prog="mcp-slim",
       description=(
-          "Zero-config MCP proxy that cuts tool schema & output token usage by "
-          "60-80% and redacts leaked secrets."
+          "Zero-dependency MCP proxy for schema compaction (-49% tokens), "
+          "lazy meta-tool discovery (-98% tokens), and real-time secret redaction."
       ),
   )
   parser.add_argument(
@@ -263,13 +357,18 @@ def main(argv: list[str] | None = None) -> int:
       "--allow-tools",
       type=str,
       default=None,
-      help="Comma-separated allowlist of tool names to expose",
+      help="Comma-separated allowlist of tool names or globs (e.g. 'get_*,search_*')",
   )
   run_p.add_argument(
       "--deny-tools",
       type=str,
       default=None,
-      help="Comma-separated denylist of tool names to hide",
+      help="Comma-separated denylist of tool names or globs (e.g. 'delete_*')",
+  )
+  run_p.add_argument(
+      "--lazy",
+      action="store_true",
+      help="Enable LazyToolBroker on-demand discovery (exposes 2 meta-tools, cutting static schema tokens by ~98%)",
   )
   run_p.add_argument(
       "--no-secret-guard",
@@ -295,6 +394,23 @@ def main(argv: list[str] | None = None) -> int:
   wrap_p.add_argument(
       "-i", "--in-place", action="store_true", help="Modify the config file in place"
   )
+  wrap_p.add_argument(
+      "--lazy",
+      action="store_true",
+      help="Wrap servers with --lazy on-demand discovery mode",
+  )
+
+  audit_p = sub.add_parser(
+      "audit",
+      help="Audit token footprint and $defs/$ref compatibility of a tools JSON file",
+  )
+  audit_p.add_argument(
+      "file",
+      type=Path,
+      nargs="?",
+      default=None,
+      help="Optional path to tools JSON or benchmark fixture",
+  )
 
   sub.add_parser("benchmark", help="Run built-in token compression & security benchmark")
 
@@ -303,8 +419,11 @@ def main(argv: list[str] | None = None) -> int:
   if parsed.subcommand == "benchmark":
     return run_benchmark()
 
+  if parsed.subcommand == "audit":
+    return run_audit(parsed.file)
+
   if parsed.subcommand == "wrap":
-    return wrap_config(parsed.config, in_place=parsed.in_place)
+    return wrap_config(parsed.config, in_place=parsed.in_place, lazy=parsed.lazy)
 
   if parsed.subcommand == "run":
     cmd = list(parsed.command)
@@ -331,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         ),
         output_slimmer=OutputSlimmer(),
         secret_guard=SecretGuard(enabled=not parsed.no_secret_guard),
+        lazy=parsed.lazy,
         quiet=parsed.quiet,
     )
     return asyncio.run(proxy.run_stdio(cmd))
