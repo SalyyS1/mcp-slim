@@ -12,6 +12,21 @@ from typing import Any
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _WHITESPACE_RUN = re.compile(r"[ \t]{2,}")
 _BLANK_LINES = re.compile(r"\n{3,}")
+_LONE_SURROGATE = re.compile(r"[\ud800-\udfff]")
+
+_NOISY_HYPERMEDIA_KEYS = frozenset({
+    "followers_url",
+    "following_url",
+    "gists_url",
+    "starred_url",
+    "subscriptions_url",
+    "organizations_url",
+    "repos_url",
+    "events_url",
+    "received_events_url",
+    "gravatar_id",
+    "node_id",
+})
 
 _ABBREV_EXPANSIONS: dict[str, set[str]] = {
     "repo": {"repo", "repository"},
@@ -134,6 +149,7 @@ class SlimStats:
   tools_total: int = 0
   tools_kept: int = 0
   refs_inlined: int = 0
+  cache_hits: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -164,12 +180,14 @@ class SchemaSlimmer:
       allow_tools: set[str] | None = None,
       deny_tools: set[str] | None = None,
       inline_refs: bool = True,
+      canonical_sort: bool = True,
   ) -> None:
     self.max_desc_chars = max_desc_chars
     self.max_param_desc_chars = max_param_desc_chars
     self.allow_tools = allow_tools
     self.deny_tools = deny_tools or set()
     self.inline_refs = inline_refs
+    self.canonical_sort = canonical_sort
 
   def _resolve_ref(
       self,
@@ -239,7 +257,8 @@ class SchemaSlimmer:
         continue
       if k == "properties" and isinstance(v, dict):
         props: dict[str, Any] = {}
-        for prop_name, prop_schema in v.items():
+        prop_items = sorted(v.items()) if self.canonical_sort else v.items()
+        for prop_name, prop_schema in prop_items:
           slimmed_prop = self.slim_schema_node(
               prop_schema, is_root=False, defs=defs, visited=visited, stats=stats
           )
@@ -276,7 +295,10 @@ class SchemaSlimmer:
             for branch in v
         ]
         continue
-      if k == "required" and isinstance(v, list) and not v:
+      if k == "required" and isinstance(v, list):
+        if not v:
+          continue
+        out[k] = list(v)
         continue
       out[k] = v
     if is_root and "type" not in out:
@@ -316,6 +338,8 @@ class SchemaSlimmer:
       if not self.is_tool_allowed(name):
         continue
       filtered.append(self.slim_tool(tool, stats=stats))
+    if self.canonical_sort:
+      filtered.sort(key=lambda t: t.get("name", ""))
     if stats is not None:
       after_tokens = estimate_tokens(filtered)
       stats.tools_total += len(tools)
@@ -481,15 +505,19 @@ class OutputSlimmer:
       max_list_items: int = 50,
       max_string_chars: int = 4000,
       strip_nulls: bool = True,
+      strip_hypermedia: bool = True,
   ) -> None:
     self.max_list_items = max_list_items
     self.max_string_chars = max_string_chars
     self.strip_nulls = strip_nulls
+    self.strip_hypermedia = strip_hypermedia
 
   def compact_json_value(self, value: Any) -> Any:
     if isinstance(value, dict):
       out: dict[str, Any] = {}
       for k, v in value.items():
+        if self.strip_hypermedia and k in _NOISY_HYPERMEDIA_KEYS:
+          continue
         if self.strip_nulls and (v is None or v == "" or v == [] or v == {}):
           continue
         compacted = self.compact_json_value(v)
@@ -513,24 +541,60 @@ class OutputSlimmer:
         )
       return compacted_list
     if isinstance(value, str):
-      if len(value) > self.max_string_chars:
+      cleaned_val = _LONE_SURROGATE.sub("\ufffd", value)
+      if len(cleaned_val) > self.max_string_chars:
         return (
-            value[: self.max_string_chars]
-            + f"... [truncated {len(value) - self.max_string_chars} chars]"
+            cleaned_val[: self.max_string_chars]
+            + f"... [truncated {len(cleaned_val) - self.max_string_chars} chars]"
         )
-      return value
+      return cleaned_val
     return value
+
+  def _fit_json_within_budget(self, compacted: Any) -> str:
+    """Ensures serialized JSON stays valid even when a list of objects exceeds max_string_chars."""
+    serialized = json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) <= self.max_string_chars:
+      return serialized
+
+    if isinstance(compacted, list) and len(compacted) > 1:
+      kept: list[Any] = []
+      for item in compacted:
+        candidate = [*kept, item, f"... ({len(compacted) - len(kept) - 1} more items truncated by mcp-slim)"]
+        if len(json.dumps(candidate, ensure_ascii=False, separators=(",", ":"))) > self.max_string_chars and kept:
+          break
+        kept.append(item)
+      rem = len(compacted) - len(kept)
+      if rem > 0:
+        kept.append(f"... ({rem} more items truncated by mcp-slim)")
+      return json.dumps(kept, ensure_ascii=False, separators=(",", ":"))
+
+    if isinstance(compacted, dict):
+      for list_key in ("items", "results", "data", "rows", "issues", "commits", "nodes"):
+        arr = compacted.get(list_key)
+        if isinstance(arr, list) and len(arr) > 1:
+          kept_arr: list[Any] = []
+          for item in arr:
+            trial = {**compacted, list_key: [*kept_arr, item]}
+            if len(json.dumps(trial, ensure_ascii=False, separators=(",", ":"))) > self.max_string_chars and kept_arr:
+              break
+            kept_arr.append(item)
+          rem = len(arr) - len(kept_arr)
+          if rem > 0:
+            kept_arr.append(f"... ({rem} more items truncated by mcp-slim)")
+          return json.dumps({**compacted, list_key: kept_arr}, ensure_ascii=False, separators=(",", ":"))
+
+    return serialized
 
   def slim_text(self, text: str) -> str:
     if not text:
       return text
-    cleaned = _ANSI_ESCAPE.sub("", text)
+    cleaned = _LONE_SURROGATE.sub("\ufffd", _ANSI_ESCAPE.sub("", text))
     stripped = cleaned.strip()
     if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
       try:
         parsed = json.loads(stripped)
         compacted = self.compact_json_value(parsed)
-        return json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+        return self._fit_json_within_budget(compacted)
       except (json.JSONDecodeError, TypeError):
         pass
     cleaned = _WHITESPACE_RUN.sub(" ", cleaned)

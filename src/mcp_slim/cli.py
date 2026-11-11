@@ -221,26 +221,7 @@ def run_benchmark() -> int:
   return 0
 
 
-def run_audit(path: Path | None = None) -> int:
-  if path is not None:
-    raw_data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(raw_data, list):
-      tools = raw_data
-    elif isinstance(raw_data, dict) and isinstance(raw_data.get("tools"), list):
-      tools = raw_data["tools"]
-    elif isinstance(raw_data, dict) and isinstance(raw_data.get("servers"), dict):
-      tools = [
-          t
-          for srv_tools in raw_data["servers"].values()
-          if isinstance(srv_tools, list)
-          for t in srv_tools
-      ]
-    else:
-      sys.stderr.write(f"Could not locate a tools list inside {path}\n")
-      return 1
-  else:
-    tools = SAMPLE_BENCHMARK_TOOLS
-
+def _print_tools_audit(tools: list[dict[str, Any]], label: str = "") -> int:
   slimmer = SchemaSlimmer()
   stats_std = SlimStats()
   slimmed_tools = slimmer.slim_tools_list(tools, stats=stats_std)
@@ -249,17 +230,21 @@ def run_audit(path: Path | None = None) -> int:
   stats_lazy = SlimStats()
   broker.ingest_tools(tools, stats=stats_lazy)
 
-  print(f"mcp-slim Schema Audit ({len(tools)} tools)")
+  title_suffix = f" - {label}" if label else ""
+  print(f"mcp-slim Schema Audit ({len(tools)} tools{title_suffix})")
   print("=" * 78)
   print(f"{'TOOL NAME':<32} | {'RAW TOK':>9} | {'SLIM TOK':>9} | {'SAVED':>9} | {'$REF':>6}")
   print("-" * 78)
-  for raw_t, slim_t in zip(tools[:20], slimmed_tools[:20]):
+  slim_by_name = {t.get("name", ""): t for t in slimmed_tools}
+  for raw_t in tools[:20]:
+    name = raw_t.get("name", "")
+    slim_t = slim_by_name.get(name, raw_t)
     r_tok = estimate_tokens(raw_t)
     s_tok = estimate_tokens(slim_t)
     pct = round(((r_tok - s_tok) / max(1, r_tok)) * 100.0, 1)
     has_ref = "$defs" in json.dumps(raw_t) or "$ref" in json.dumps(raw_t)
     print(
-        f"{raw_t.get('name', ''):<32.32} | {r_tok:>9} | {s_tok:>9} |"
+        f"{name:<32.32} | {r_tok:>9} | {s_tok:>9} |"
         f" {f'-{pct}%':>9} | {'FIXED' if has_ref else 'ok':>6}"
     )
   if len(tools) > 20:
@@ -289,6 +274,92 @@ def run_audit(path: Path | None = None) -> int:
   )
   print("=" * 78)
   return 0
+
+
+def run_audit(path: Path | None = None) -> int:
+  if path is not None:
+    raw_data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(raw_data, list):
+      tools = raw_data
+    elif isinstance(raw_data, dict) and isinstance(raw_data.get("tools"), list):
+      tools = raw_data["tools"]
+    elif isinstance(raw_data, dict) and isinstance(raw_data.get("servers"), dict):
+      tools = [
+          t
+          for srv_tools in raw_data["servers"].values()
+          if isinstance(srv_tools, list)
+          for t in srv_tools
+      ]
+    else:
+      sys.stderr.write(f"Could not locate a tools list inside {path}\n")
+      return 1
+  else:
+    tools = SAMPLE_BENCHMARK_TOOLS
+  return _print_tools_audit(tools)
+
+
+async def _inspect_stdio_server(command: list[str], timeout: float = 15.0) -> list[dict[str, Any]]:
+  """Spawns a live MCP stdio server, performs initialize + tools/list handshake, and returns tools."""
+  proc = await asyncio.create_subprocess_exec(
+      *command,
+      stdin=asyncio.subprocess.PIPE,
+      stdout=asyncio.subprocess.PIPE,
+      stderr=asyncio.subprocess.PIPE,
+  )
+  assert proc.stdin is not None
+  assert proc.stdout is not None
+  try:
+    init_req = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "mcp-slim-inspector", "version": __version__},
+        },
+    }
+    proc.stdin.write((json.dumps(init_req) + "\n").encode("utf-8"))
+    await proc.stdin.drain()
+
+    while True:
+      line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+      if not line:
+        raise RuntimeError("MCP server closed stdout during initialize handshake")
+      msg = json.loads(line.decode("utf-8", errors="replace"))
+      if isinstance(msg, dict) and msg.get("id") == 1:
+        break
+
+    notif = {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}
+    list_req = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+    proc.stdin.write(
+        (json.dumps(notif) + "\n" + json.dumps(list_req) + "\n").encode("utf-8")
+    )
+    await proc.stdin.drain()
+
+    while True:
+      line = await asyncio.wait_for(proc.stdout.readline(), timeout=timeout)
+      if not line:
+        raise RuntimeError("MCP server closed stdout before returning tools/list")
+      msg = json.loads(line.decode("utf-8", errors="replace"))
+      if isinstance(msg, dict) and msg.get("id") == 2:
+        tools = msg.get("result", {}).get("tools", [])
+        return tools if isinstance(tools, list) else []
+  finally:
+    try:
+      proc.terminate()
+      await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except Exception:
+      pass
+
+
+def run_inspect(command: list[str]) -> int:
+  try:
+    tools = asyncio.run(_inspect_stdio_server(command))
+  except Exception as exc:
+    sys.stderr.write(f"Failed to inspect MCP server {' '.join(command)}: {exc}\n")
+    return 1
+  return _print_tools_audit(tools, label=" ".join(command[:2]))
 
 
 def wrap_config(
@@ -371,6 +442,12 @@ def main(argv: list[str] | None = None) -> int:
       help="Enable LazyToolBroker on-demand discovery (exposes 2 meta-tools, cutting static schema tokens by ~98%)",
   )
   run_p.add_argument(
+      "--cache-ttl",
+      type=float,
+      default=0.0,
+      help="TTL in seconds to cache deterministic read-only tool calls (get_*, read_*, list_*, search_*)",
+  )
+  run_p.add_argument(
       "--no-secret-guard",
       action="store_true",
       help="Disable bidirectional secret redaction",
@@ -412,6 +489,16 @@ def main(argv: list[str] | None = None) -> int:
       help="Optional path to tools JSON or benchmark fixture",
   )
 
+  inspect_p = sub.add_parser(
+      "inspect",
+      help="Spawn a live MCP server over stdio, query tools/list, and print a token & schema audit",
+  )
+  inspect_p.add_argument(
+      "command",
+      nargs=argparse.REMAINDER,
+      help="Live MCP server command to inspect (after '--')",
+  )
+
   sub.add_parser("benchmark", help="Run built-in token compression & security benchmark")
 
   parsed = parser.parse_args(args_list)
@@ -421,6 +508,14 @@ def main(argv: list[str] | None = None) -> int:
 
   if parsed.subcommand == "audit":
     return run_audit(parsed.file)
+
+  if parsed.subcommand == "inspect":
+    cmd = list(parsed.command)
+    if cmd and cmd[0] == "--":
+      cmd = cmd[1:]
+    if not cmd:
+      inspect_p.error("missing server command after '--'")
+    return run_inspect(cmd)
 
   if parsed.subcommand == "wrap":
     return wrap_config(parsed.config, in_place=parsed.in_place, lazy=parsed.lazy)
@@ -451,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
         output_slimmer=OutputSlimmer(),
         secret_guard=SecretGuard(enabled=not parsed.no_secret_guard),
         lazy=parsed.lazy,
+        cache_ttl=parsed.cache_ttl,
         quiet=parsed.quiet,
     )
     return asyncio.run(proxy.run_stdio(cmd))

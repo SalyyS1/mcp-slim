@@ -36,16 +36,18 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.2.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.3.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -51.6% tokens)** |
 | **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
+| **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
 | **Wildcard Glob Tool Filtering (`get_*,search_*`)** | No | Exact names | No | No | **Yes (`--allow-tools` / `--deny-tools`)** |
 | **`$defs` / `$ref` Inlining (Gemini / Vertex / Azure fix)** | No | No | No | No | **Yes (Recursive with cycle guard)** |
-| **`tools/call` JSON & Text Output Compaction** | No | No | No | No | **Yes (-43.0% output tokens)** |
+| **`tools/call` Valid-JSON Budget Compaction & Hypermedia Pruning** | No | No | No | No | **Yes (-43%+ output tokens, never breaks JSON)** |
+| **Read-Only Tool Call TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (Auto-invalidated on mutations)** |
 | **Bidirectional Real-Time Secret Redaction** | No | No | No | No | **Yes (12 categories, `141 µs` p50)** |
-| **Built-In Schema Token Auditor (`mcp-slim audit`)** | No | No | No | No | **Yes** |
+| **Live Stdio Server Inspector (`mcp-slim inspect`)** | No | No | No | No | **Yes (`mcp-slim inspect -- <cmd>`)** |
 
 ---
 
@@ -105,9 +107,15 @@ mcp-slim wrap -i ~/.cursor/mcp.json
 mcp-slim wrap --lazy -i ~/.cursor/mcp.json
 ```
 
-### 3. Audit Any MCP Tool Schema Manifest
+### 3. Inspect a Live MCP Server or Static Schema Manifest
+
+Spawn any live MCP server over stdio, perform the JSON-RPC `initialize` + `tools/list` handshake automatically, and audit its token consumption without an LLM client:
 
 ```bash
+# Live stdio server inspection (no chat session or API key required):
+mcp-slim inspect -- npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# Or audit a static tools JSON manifest:
 mcp-slim audit benchmarks/fixtures/real_mcp_workload.json
 ```
 
@@ -148,9 +156,10 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 - Answers `mcp_search_tools(query, limit)` locally inside the proxy in `<0.1 ms` using BM25 ranking over tool names, descriptions, and parameter keys.
 - Rewrites `mcp_call_tool(tool_name, arguments)` directly into native upstream `tools/call` JSON-RPC requests.
 
-### 3. `OutputSlimmer` (`tools/call`)
-- **JSON Compaction and Empty-Value Pruning:** Parses JSON strings inside `content[].text`, recursively removes keys with `null`, `""`, `[]`, or `{}` values, and re-serializes without indentation whitespace.
-- **ANSI Escape Removal & Collection Bounding:** Strips terminal escape sequences and caps oversized arrays/strings with explicit truncation markers.
+### 3. `OutputSlimmer` & Read-Only TTL Cache (`tools/call`)
+- **Structure-Aware JSON Compaction & Hypermedia Pruning:** Parses JSON strings inside `content[].text`, recursively removes `null`, `""`, `[]`, `{}` values and noisy REST hypermedia keys (`followers_url`, `gists_url`, `node_id`, etc.), and trims oversized object arrays on element boundaries so truncated payloads remain **100% valid, parseable JSON**.
+- **Deterministic Read-Only TTL Cache (`--cache-ttl <seconds>`):** Caches idempotent read calls (`get_*`, `read_*`, `list_*`, `search_*`, `fetch_*`) keyed by canonical arguments and automatically invalidates the cache when any mutating tool is invoked.
+- **UTF-16 Surrogate & ANSI Sanitization:** Strips terminal escape sequences and replaces lone UTF-16 surrogates (`\ud800`–`\udfff`) so malformed tool outputs never crash stdio streams.
 
 ### 4. `SecretGuard` (Bidirectional Credential Redaction)
 Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/call` results across 12 credential categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, and env secrets).

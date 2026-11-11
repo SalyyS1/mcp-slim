@@ -5,10 +5,28 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from typing import Any
 
 from .guard import SecretGuard
 from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
+
+_READ_ONLY_PREFIXES = (
+    "get_",
+    "read_",
+    "list_",
+    "search_",
+    "fetch_",
+    "describe_",
+    "inspect_",
+    "find_",
+    "query_",
+)
+
+
+def _is_read_only_tool(name: str) -> bool:
+  lower = name.lower()
+  return lower.startswith(_READ_ONLY_PREFIXES)
 
 
 class MCPProxy:
@@ -20,6 +38,7 @@ class MCPProxy:
       output_slimmer: OutputSlimmer | None = None,
       secret_guard: SecretGuard | None = None,
       lazy: bool = False,
+      cache_ttl: float = 0.0,
       quiet: bool = False,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
@@ -29,9 +48,12 @@ class MCPProxy:
     self.lazy_broker = (
         LazyToolBroker(schema_slimmer=self.schema_slimmer) if lazy else None
     )
+    self.cache_ttl = cache_ttl
     self.stats = SlimStats()
     self.quiet = quiet
     self._pending_methods: dict[str | int, str] = {}
+    self._pending_cache_keys: dict[str | int, str] = {}
+    self._read_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     self._local_responses: list[str] = []
 
   def pop_local_responses(self) -> list[str]:
@@ -92,6 +114,35 @@ class MCPProxy:
               if isinstance(arguments.get("arguments"), dict)
               else {}
           )
+          tool_name = params["name"]
+          arguments = params["arguments"]
+
+      if self.cache_ttl > 0.0 and isinstance(tool_name, str):
+        if _is_read_only_tool(tool_name):
+          canonical_args = json.dumps(
+              arguments if isinstance(arguments, dict) else {},
+              sort_keys=True,
+              separators=(",", ":"),
+          )
+          cache_key = f"{tool_name}:{canonical_args}"
+          cached = self._read_cache.get(cache_key)
+          now = time.monotonic()
+          if cached is not None and now < cached[0]:
+            self.stats.cache_hits += 1
+            hit_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": cached[1],
+            }
+            self._local_responses.append(
+                json.dumps(hit_payload, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
+            return ""
+          if msg_id is not None:
+            self._pending_cache_keys[msg_id] = cache_key
+        else:
+          self._read_cache.clear()
 
     if msg_id is not None and isinstance(method, str):
       self._pending_methods[msg_id] = method
@@ -115,6 +166,11 @@ class MCPProxy:
     method = (
         self._pending_methods.pop(msg_id, None) if msg_id is not None else None
     )
+    pending_cache_key = (
+        self._pending_cache_keys.pop(msg_id, None)
+        if msg_id is not None
+        else None
+    )
     result = msg.get("result")
 
     if isinstance(result, dict):
@@ -133,7 +189,22 @@ class MCPProxy:
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
       msg["result"] = result
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
-      return self.secret_guard.redact_text(serialized) + "\n"
+      redacted_str = self.secret_guard.redact_text(serialized)
+      if (
+          pending_cache_key is not None
+          and self.cache_ttl > 0.0
+          and not result.get("isError")
+      ):
+        try:
+          redacted_msg = json.loads(redacted_str)
+          if isinstance(redacted_msg.get("result"), dict):
+            self._read_cache[pending_cache_key] = (
+                time.monotonic() + self.cache_ttl,
+                redacted_msg["result"],
+            )
+        except json.JSONDecodeError:
+          pass
+      return redacted_str + "\n"
 
     return raw_line
 

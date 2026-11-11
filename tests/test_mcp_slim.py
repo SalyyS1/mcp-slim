@@ -239,6 +239,99 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertEqual(main(["benchmark"]), 0)
     self.assertEqual(main(["audit"]), 0)
 
+  def test_canonical_sort_stabilizes_kv_cache_prefix(self) -> None:
+    slimmer = SchemaSlimmer(canonical_sort=True)
+    tools_order_a = list(reversed(SAMPLE_BENCHMARK_TOOLS))
+    tools_order_b = list(SAMPLE_BENCHMARK_TOOLS)
+    out_a = json.dumps(slimmer.slim_tools_list(tools_order_a), separators=(",", ":"))
+    out_b = json.dumps(slimmer.slim_tools_list(tools_order_b), separators=(",", ":"))
+    self.assertEqual(out_a, out_b)
+
+  def test_hypermedia_stripping_and_valid_json_budget_truncation(self) -> None:
+    out_slimmer = OutputSlimmer(max_list_items=50, max_string_chars=260)
+    raw = {
+        "content": [
+            {
+                "type": "text",
+                "text": json.dumps({
+                    "total_count": 10,
+                    "items": [
+                        {
+                            "id": i,
+                            "name": f"repo_{i}",
+                            "description": "A repository with some detailed text payload " + ("x" * 30),
+                            "followers_url": "https://api.github.com/users/u/followers",
+                            "node_id": "MDEwOlJlcG9zaXRvcnk=",
+                        }
+                        for i in range(10)
+                    ],
+                }),
+            }
+        ]
+    }
+    slimmed = out_slimmer.slim_call_result(raw)
+    slim_text = slimmed["content"][0]["text"]
+    # Output must remain 100% valid parseable JSON even when truncated by character budget
+    parsed = json.loads(slim_text)
+    self.assertNotIn("followers_url", parsed["items"][0])
+    self.assertNotIn("node_id", parsed["items"][0])
+    self.assertLess(len(parsed["items"]), 10)
+    self.assertIn("more items truncated", parsed["items"][-1])
+
+  def test_read_only_tool_call_ttl_cache_and_mutation_invalidation(self) -> None:
+    proxy = MCPProxy(cache_ttl=60.0, quiet=True)
+    req1 = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/call",
+        "params": {"name": "get_issue", "arguments": {"repo": "a/b", "number": 1}},
+    })
+    self.assertNotEqual(proxy.process_client_message(req1), "")
+    proxy.process_server_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "result": {"content": [{"type": "text", "text": '{"id":1,"title":"bug"}'}]},
+        })
+    )
+
+    # Second identical read call hits local TTL cache
+    req2 = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": {"name": "get_issue", "arguments": {"number": 1, "repo": "a/b"}},
+    })
+    self.assertEqual(proxy.process_client_message(req2), "")
+    self.assertEqual(proxy.stats.cache_hits, 1)
+    cached_replies = proxy.pop_local_responses()
+    self.assertEqual(len(cached_replies), 1)
+    self.assertEqual(json.loads(cached_replies[0])["id"], 11)
+
+    # Mutating tool call invalidates read cache
+    mut_req = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 12,
+        "method": "tools/call",
+        "params": {"name": "create_issue", "arguments": {"title": "new"}},
+    })
+    self.assertNotEqual(proxy.process_client_message(mut_req), "")
+    self.assertNotEqual(proxy.process_client_message(req2), "")
+
+  def test_live_stdio_server_inspect_command(self) -> None:
+    mock_server_code = (
+        "import sys, json\n"
+        "for line in sys.stdin:\n"
+        "  msg = json.loads(line)\n"
+        "  if msg.get('method') == 'initialize':\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)\n"
+        "  elif msg.get('method') == 'tools/list':\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'tools':[{'name':'read_file','description':'Read file content from disk.','inputSchema':{'type':'object','properties':{'path':{'type':'string','description':'The path'}}}}]}}), flush=True)\n"
+        "    break\n"
+    )
+    rc = main(["inspect", "--", "python3", "-c", mock_server_code])
+    self.assertEqual(rc, 0)
+
 
 if __name__ == "__main__":
   unittest.main()
