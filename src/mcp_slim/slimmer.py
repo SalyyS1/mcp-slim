@@ -256,7 +256,7 @@ class SchemaSlimmer:
 
     out: dict[str, Any] = {}
     for k, v in node.items():
-      if k in _REDUNDANT_SCHEMA_KEYS:
+      if k in _REDUNDANT_SCHEMA_KEYS or (isinstance(k, str) and k.startswith("x-")):
         continue
       if k == "description" and isinstance(v, str):
         compact = compact_description(v, max_chars=self.max_param_desc_chars)
@@ -348,6 +348,21 @@ class SchemaSlimmer:
           if isinstance(p_spec, dict) and isinstance(p_spec.get("type"), str):
             param_map[p_name] = p_spec["type"]
         self._tool_param_types[tool["name"]] = param_map
+    output_schema = tool.get("outputSchema")
+    if isinstance(output_schema, dict):
+      slim_out_schema = self.slim_schema_node(
+          output_schema, is_root=True, stats=stats
+      )
+      if isinstance(slim_out_schema, dict):
+        out_props = slim_out_schema.get("properties")
+        is_void_schema = slim_out_schema.get("type") == "null" or (
+            isinstance(out_props, dict)
+            and len(out_props) == 1
+            and isinstance(out_props.get("result"), dict)
+            and out_props["result"].get("type") == "null"
+        )
+        if not is_void_schema:
+          slimmed["outputSchema"] = slim_out_schema
     return slimmed
 
   def coerce_arguments(
@@ -755,9 +770,11 @@ class OutputSlimmer:
     if "structuredContent" in out and isinstance(
         out["structuredContent"], (dict, list)
     ):
-      out["structuredContent"] = self.compact_json_value(
-          out["structuredContent"]
-      )
+      compacted_sc = self.compact_json_value(out["structuredContent"])
+      if compacted_sc in (None, {}, []):
+        out.pop("structuredContent", None)
+      else:
+        out["structuredContent"] = compacted_sc
     if stats is not None:
       after_tokens = estimate_tokens(out)
       stats.output_tokens_before += before_tokens

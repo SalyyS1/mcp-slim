@@ -491,6 +491,49 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertIn("blocked by proxy allow/deny policy", reply_obj["result"]["content"][0]["text"])
     self.assertEqual(proxy.stats.blocked_calls, 1)
 
+  def test_output_schema_compaction_and_void_fastmcp_cleanup(self) -> None:
+    slimmer = SchemaSlimmer()
+    void_tool = {
+        "name": "do_nothing",
+        "description": "Void tool with postponed None annotation.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "$id": "output",
+            "type": "object",
+            "properties": {"result": {"type": "null"}},
+            "required": ["result"],
+            "x-fastmcp-wrap-result": True,
+        },
+    }
+    slimmed_void = slimmer.slim_tool(void_tool)
+    self.assertNotIn("outputSchema", slimmed_void)
+
+    non_void_tool = {
+        "name": "get_weather",
+        "description": "Fetch weather.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "$id": "urn:example:weather-output",
+            "title": "WeatherOutput",
+            "type": "object",
+            "properties": {"temp": {"title": "Temp", "type": "number"}},
+            "required": ["temp"],
+            "x-fastmcp-wrap-result": True,
+        },
+    }
+    slimmed_non_void = slimmer.slim_tool(non_void_tool)
+    self.assertIn("outputSchema", slimmed_non_void)
+    self.assertNotIn("$id", slimmed_non_void["outputSchema"])
+    self.assertNotIn("x-fastmcp-wrap-result", slimmed_non_void["outputSchema"])
+
+    out_slimmer = OutputSlimmer()
+    void_res = {
+        "content": [{"type": "text", "text": ""}],
+        "structuredContent": {"result": None},
+    }
+    slimmed_res = out_slimmer.slim_call_result(void_res)
+    self.assertNotIn("structuredContent", slimmed_res)
+
 
 if __name__ == "__main__":
   unittest.main()
