@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mcp-slim — MCP Token Compression &amp; Real-Time Secret Redaction Proxy</title>
+  <meta name="description" content="Zero-dependency Python 3.10+ MCP JSON-RPC 2.0 stdio proxy that compresses tools/list schemas and tools/call outputs by 48.8% fewer tokens while redacting leaked API keys in ~0.93 ms p50.">
+  <meta property="og:title" content="mcp-slim — Cut MCP Context Bloat by 48.8% &amp; Redact Leaked Secrets">
+  <meta property="og:description" content="Zero-dependency stdio proxy for Claude Code, Cursor, Windsurf, and LibreChat. Compacts tools/list &amp; tools/call JSON-RPC payloads with 0.93 ms p50 latency.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://salyys1.github.io/mcp-slim/">
+  <meta name="twitter:card" content="summary_large_image">
+  <style>
+    :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); margin: 0; line-height: 1.6; }
+    .container { max-width: 980px; margin: 0 auto; padding: 48px 24px; }
+    .badge-row { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .badge { background: #1f2937; border: 1px solid var(--border); padding: 4px 10px; border-radius: 999px; font-size: 13px; color: var(--accent); }
+    h1 { font-size: 40px; margin: 0 0 12px; letter-spacing: -0.5px; }
+    .lead { font-size: 19px; color: var(--muted); margin-bottom: 28px; }
+    .cta-row { display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 40px; }
+    .btn { display: inline-block; padding: 10px 20px; border-radius: 6px; font-weight: 600; text-decoration: none; font-size: 15px; }
+    .btn-primary { background: #238636; color: #fff; }
+    .btn-secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 24px; margin-bottom: 28px; }
+    pre { background: #010409; border: 1px solid var(--border); padding: 14px; border-radius: 6px; overflow-x: auto; font-size: 13.5px; color: #c9d1d9; }
+    img { max-width: 100%; border-radius: 6px; border: 1px solid var(--border); margin: 12px 0; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="badge-row">
+      <span class="badge">Zero Dependencies (Python 3.10+)</span>
+      <span class="badge">-48.8% Context Tokens</span>
+      <span class="badge">930.6 &micro;s p50 Latency</span>
+      <span class="badge">12 Secret Redaction Categories</span>
+    </div>
+    <h1>mcp-slim</h1>
+    <p class="lead">Transparent Model Context Protocol (MCP) JSON-RPC 2.0 stdio proxy that compresses bloated <code>tools/list</code> schemas and <code>tools/call</code> payloads while redacting leaked API keys and credentials in real time.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/SalyyS1/mcp-slim">View on GitHub &rarr;</a>
+      <a class="btn btn-secondary" href="https://github.com/SalyyS1/loraspectra">Explore Companion Project: loraspectra &rarr;</a>
+    </div>
+    <div class="card">
+      <h2>Quick Start (1-Command Config Wrapper)</h2>
+      <pre><code>pip install git+https://github.com/SalyyS1/mcp-slim.git
+mcp-slim wrap -i ~/.cursor/mcp.json</code></pre>
+    </div>
+    <div class="card">
+      <h2>Verified Context Token &amp; Latency Benchmarks</h2>
+      <img src="assets/benchmark-tokens.svg" alt="MCP Context Token Compression Benchmark">
+      <img src="assets/benchmark-latency.svg" alt="MCP Proxy Latency and Throughput Benchmark">
+    </div>
+  </div>
+</body>
+</html>

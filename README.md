@@ -170,3 +170,9 @@ python3 benchmarks/run_benchmarks.py
 ## License
 
 Released under the [MIT License](./LICENSE).
+
+---
+
+## Related AI Infrastructure Projects by [@SalyyS1](https://github.com/SalyyS1)
+
+- **[loraspectra](https://github.com/SalyyS1/loraspectra)** — Zero-dependency Rust engine & CLI for auditing spectral rank collapse, dynamically compressing `.safetensors` LoRA adapters by **-83.8%** at **99% Frobenius energy**, and merging conflicting adapters via QR-Core Orthogonal Subspace Projection (`1,050x–2,680x` faster than dense SVD).
