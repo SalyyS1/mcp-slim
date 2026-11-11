@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 470" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <style>
+      .mono { font-family: 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', Consolas, monospace; font-size: 13px; }
+      .title { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; fill: #8b949e; }
+      .cmd { fill: #f0f6fc; font-weight: 600; }
+      .prompt { fill: #3fb950; font-weight: 700; }
+      .muted { fill: #8b949e; }
+      .cyan { fill: #58a6ff; }
+      .green { fill: #3fb950; font-weight: 600; }
+      .amber { fill: #d29922; font-weight: 600; }
+      .red { fill: #f85149; font-weight: 600; }
+      .purple { fill: #bc8cff; font-weight: 600; }
+    </style>
+  </defs>
+
+  <rect width="920" height="470" rx="12" fill="url(#bg)" stroke="#30363d" stroke-width="1.5"/>
+  <rect width="920" height="38" rx="12" fill="#161b22"/>
+  <line x1="0" y1="38" x2="920" y2="38" stroke="#30363d" stroke-width="1"/>
+
+  <circle cx="22" cy="19" r="6" fill="#f85149"/>
+  <circle cx="42" cy="19" r="6" fill="#d29922"/>
+  <circle cx="62" cy="19" r="6" fill="#3fb950"/>
+  <text x="460" y="24" text-anchor="middle" class="title">mcp-slim v0.5.0 - Live MCP Schema Audit &amp; Stdio Proxy</text>
+
+  <text x="24" y="68" class="mono">
+    <tspan class="prompt">$</tspan>
+    <tspan class="cmd"> mcp-slim audit benchmarks/fixtures/real_mcp_workload.json</tspan>
+  </text>
+
+  <text x="24" y="96" class="mono cyan">mcp-slim Schema Audit (60 tools across git, filesystem, postgres, github)</text>
+  <text x="24" y="114" class="mono muted">========================================================================================</text>
+  <text x="24" y="132" class="mono muted">TOOL NAME                        |   RAW TOK |  SLIM TOK |     SAVED |   $REF   | DIALECT</text>
+  <text x="24" y="148" class="mono muted">----------------------------------------------------------------------------------------</text>
+
+  <text x="24" y="168" class="mono">
+    <tspan fill="#e6edf3">create_or_update_file            |       612 |       284 | </tspan>
+    <tspan class="green">   -53.6%</tspan>
+    <tspan fill="#e6edf3"> | </tspan>
+    <tspan class="amber">INLINED</tspan>
+    <tspan fill="#e6edf3">  | </tspan>
+    <tspan class="green">Gemini OK</tspan>
+  </text>
+  <text x="24" y="188" class="mono">
+    <tspan fill="#e6edf3">search_issues                    |       548 |       269 | </tspan>
+    <tspan class="green">   -50.9%</tspan>
+    <tspan fill="#e6edf3"> | </tspan>
+    <tspan class="amber">INLINED</tspan>
+    <tspan fill="#e6edf3">  | </tspan>
+    <tspan class="green">Gemini OK</tspan>
+  </text>
+  <text x="24" y="208" class="mono">
+    <tspan fill="#e6edf3">edit_file                        |       420 |       198 | </tspan>
+    <tspan class="green">   -52.9%</tspan>
+    <tspan fill="#e6edf3"> | </tspan>
+    <tspan class="amber">INLINED</tspan>
+    <tspan fill="#e6edf3">  | </tspan>
+    <tspan class="green">Gemini OK</tspan>
+  </text>
+  <text x="24" y="228" class="mono">
+    <tspan fill="#e6edf3">git_diff_unstaged                |       214 |       108 | </tspan>
+    <tspan class="green">   -49.5%</tspan>
+    <tspan fill="#e6edf3"> |      ok  | </tspan>
+    <tspan class="green">Gemini OK</tspan>
+  </text>
+
+  <text x="24" y="246" class="mono muted">----------------------------------------------------------------------------------------</text>
+  <text x="24" y="266" class="mono">
+    <tspan fill="#e6edf3">Standard SchemaSlimmer : </tspan>
+    <tspan class="amber">12,512</tspan>
+    <tspan fill="#e6edf3"> -&gt; </tspan>
+    <tspan class="green">6,474 tokens (-48.3%)</tspan>
+    <tspan class="muted"> [Canonical KV-Cache Order]</tspan>
+  </text>
+  <text x="24" y="286" class="mono">
+    <tspan fill="#e6edf3">Lazy Discovery (--lazy): </tspan>
+    <tspan class="amber">12,512</tspan>
+    <tspan fill="#e6edf3"> -&gt; </tspan>
+    <tspan class="purple">  168 tokens (-98.7%)</tspan>
+    <tspan class="muted"> [2 On-Demand BM25 Tools]</tspan>
+  </text>
+
+  <text x="24" y="324" class="mono">
+    <tspan class="prompt">$</tspan>
+    <tspan class="cmd"> mcp-slim run --lazy --allow-tools "get_*,search_*" --cache-ttl 60 -- github-mcp-server stdio</tspan>
+  </text>
+  <text x="24" y="350" class="mono">
+    <tspan class="cyan">[mcp-slim]</tspan>
+    <tspan fill="#e6edf3"> tools/list compacted: 26 tools -&gt; 2 meta-tools (</tspan>
+    <tspan class="green">-97.7% tokens</tspan>
+    <tspan fill="#e6edf3">, p50=671 us)</tspan>
+  </text>
+  <text x="24" y="372" class="mono">
+    <tspan class="cyan">[mcp-slim]</tspan>
+    <tspan fill="#e6edf3"> tools/call ArgumentCoercer: </tspan>
+    <tspan class="amber">{"per_page": "25"}</tspan>
+    <tspan fill="#e6edf3"> -&gt; </tspan>
+    <tspan class="green">{"per_page": 25}</tspan>
+  </text>
+  <text x="24" y="394" class="mono">
+    <tspan class="cyan">[mcp-slim]</tspan>
+    <tspan fill="#e6edf3"> tools/call OutputSlimmer: 7,450 B -&gt; 4,246 B (</tspan>
+    <tspan class="green">-43.0% tokens</tspan>
+    <tspan fill="#e6edf3">, stripped 18 *_url fields)</tspan>
+  </text>
+  <text x="24" y="416" class="mono">
+    <tspan class="cyan">[mcp-slim]</tspan>
+    <tspan fill="#e6edf3"> SecretGuard redacted </tspan>
+    <tspan class="red">3 credentials</tspan>
+    <tspan fill="#e6edf3"> (</tspan>
+    <tspan class="amber">github_token, url_query_secret, prompt_injection</tspan>
+    <tspan fill="#e6edf3">)</tspan>
+  </text>
+  <text x="24" y="442" class="mono muted">Pipeline latency: p50 = 930.6 us | Peak heap: 24.4 KiB | Zero third-party dependencies</text>
+</svg>

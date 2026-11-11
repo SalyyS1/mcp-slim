@@ -8,6 +8,8 @@
 [![Protocol: MCP JSON-RPC 2.0](https://img.shields.io/badge/MCP-JSON--RPC%202.0-1f6feb)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray.svg)](https://github.com/SalyyS1/mcp-slim/blob/main/LICENSE)
 
+![mcp-slim Live Audit & Stdio Proxy Demo](assets/terminal-demo.svg)
+
 ---
 
 ## Overview
