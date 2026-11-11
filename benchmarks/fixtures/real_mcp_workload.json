@@ -1,0 +1,2827 @@
+{
+  "servers": {
+    "mcp-server-git (14 tools)": [
+      {
+        "name": "git_status",
+        "description": "Shows the working tree status",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "statusArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_diff_unstaged",
+        "description": "Shows changes in the working directory that are not yet staged",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "context_lines": {
+              "default": 3,
+              "title": "Context Lines",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "diff_unstagedArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_diff_staged",
+        "description": "Shows changes that are staged for commit",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "context_lines": {
+              "default": 3,
+              "title": "Context Lines",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "diff_stagedArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_diff",
+        "description": "Shows differences between branches or commits, or across a revision range (main..feature, main...feature)",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "target": {
+              "title": "Target",
+              "type": "string"
+            },
+            "context_lines": {
+              "default": 3,
+              "title": "Context Lines",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_path",
+            "target"
+          ],
+          "type": "object",
+          "title": "diffArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_commit",
+        "description": "Records changes to the repository",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path",
+            "message"
+          ],
+          "type": "object",
+          "title": "commitArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_add",
+        "description": "Adds file contents to the staging area",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "files": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "Files",
+              "type": "array"
+            }
+          },
+          "required": [
+            "repo_path",
+            "files"
+          ],
+          "type": "object",
+          "title": "addArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_reset",
+        "description": "Unstages all staged changes",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "resetArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_log",
+        "description": "Shows the commit logs",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "max_count": {
+              "default": 10,
+              "description": "Maximum number of commits to show. Must be at least 1.",
+              "minimum": 1,
+              "title": "Max Count",
+              "type": "integer"
+            },
+            "start_timestamp": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Start timestamp for filtering commits. Accepts: ISO 8601 format (e.g., '2024-01-15T14:30:25'), relative dates (e.g., '2 weeks ago', 'yesterday'), or absolute dates (e.g., '2024-01-15', 'Jan 15 2024')",
+              "title": "Start Timestamp"
+            },
+            "end_timestamp": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "End timestamp for filtering commits. Accepts: ISO 8601 format (e.g., '2024-01-15T14:30:25'), relative dates (e.g., '2 weeks ago', 'yesterday'), or absolute dates (e.g., '2024-01-15', 'Jan 15 2024')",
+              "title": "End Timestamp"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "logArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_create_branch",
+        "description": "Creates a new branch from an optional base branch or commit",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "branch_name": {
+              "title": "Branch Name",
+              "type": "string"
+            },
+            "base_branch": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Branch, tag or commit SHA to create the branch from. Defaults to the current branch, or to the current commit when HEAD is detached",
+              "title": "Base Branch"
+            }
+          },
+          "required": [
+            "repo_path",
+            "branch_name"
+          ],
+          "type": "object",
+          "title": "create_branchArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_checkout",
+        "description": "Switches branches",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "branch_name": {
+              "title": "Branch Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path",
+            "branch_name"
+          ],
+          "type": "object",
+          "title": "checkoutArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_merge",
+        "description": "Merges a branch into the current branch. Fast-forward only unless fast_forward_only is false; refuses a dirty working tree, and aborts a merge that conflicts, leaving the repository unchanged",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "source_branch": {
+              "description": "Branch, tag or commit to merge into the current branch",
+              "title": "Source Branch",
+              "type": "string"
+            },
+            "fast_forward_only": {
+              "default": true,
+              "description": "Only fast-forward, failing if the branches have diverged. False allows a merge commit",
+              "title": "Fast Forward Only",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "repo_path",
+            "source_branch"
+          ],
+          "type": "object",
+          "title": "mergeArguments"
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_show",
+        "description": "Shows the contents of a commit, or of a file or directory given as <revision>:<path>",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path",
+            "revision"
+          ],
+          "type": "object",
+          "title": "showArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_branch",
+        "description": "List Git branches",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "description": "The path to the Git repository.",
+              "title": "Repo Path",
+              "type": "string"
+            },
+            "branch_type": {
+              "description": "Whether to list local branches ('local'), remote branches ('remote') or all branches('all').",
+              "title": "Branch Type",
+              "type": "string"
+            },
+            "contains": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The commit sha that branch should contain. Do not pass anything to this param if no commit sha is specified",
+              "title": "Contains"
+            },
+            "not_contains": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The commit sha that branch should NOT contain. Do not pass anything to this param if no commit sha is specified",
+              "title": "Not Contains"
+            }
+          },
+          "required": [
+            "repo_path",
+            "branch_type"
+          ],
+          "type": "object",
+          "title": "branchArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "git_remote",
+        "description": "Lists the repository's remotes with their fetch and push URLs, like `git remote -v`. Credentials embedded in a URL are shown as <redacted>",
+        "inputSchema": {
+          "properties": {
+            "repo_path": {
+              "description": "The path to the Git repository.",
+              "title": "Repo Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo_path"
+          ],
+          "type": "object",
+          "title": "remoteArguments"
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      }
+    ],
+    "mcp-server-filesystem (12 tools)": [
+      {
+        "name": "read_file",
+        "description": "Read the complete contents of a file from the file system. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "read_fileArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The path to the file to read from disk.",
+              "type": "string"
+            },
+            "head": {
+              "title": "Head",
+              "description": "If provided, returns only the first N lines of the file.",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "tail": {
+              "title": "Tail",
+              "description": "If provided, returns only the last N lines of the file.",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "read_multiple_files",
+        "description": "Read the contents of multiple files simultaneously. This is more efficient than reading files one by one when you need to analyze or compare multiple files in a project.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "read_multiple_filesArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "paths": {
+              "title": "Paths",
+              "description": "Array of file paths to read sequentially.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "paths"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "write_file",
+        "description": "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles text content with proper UTF-8 encoding.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "write_fileArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The path of the file.",
+              "type": "string"
+            },
+            "content": {
+              "title": "Content",
+              "description": "The content to write into the target file.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "content"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "edit_file",
+        "description": "Make line-based edits to a text file. Each edit replaces exact line sequences with new content. Returns a git-style unified diff showing the changes made.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "edit_fileArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The path of the file to edit.",
+              "type": "string"
+            },
+            "edits": {
+              "title": "Edits",
+              "description": "List of line-replacement operations to apply in order.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "dryRun": {
+              "title": "Dryrun",
+              "description": "Preview changes using git-style diff format without writing.",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "path",
+            "edits"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "create_directory",
+        "description": "Create a new directory or ensure a directory exists. Can create multiple nested directories in one operation similar to mkdir -p.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_directoryArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The directory path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_directory",
+        "description": "Get a detailed listing of all files and directories in a specified path. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_directoryArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The directory path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_directory_with_sizes",
+        "description": "Get a detailed listing of all files and directories in a specified path, including file sizes and summary statistics.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_directory_with_sizesArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The directory path.",
+              "type": "string"
+            },
+            "sortBy": {
+              "title": "Sortby",
+              "description": "Sort entries by name or size (default: name).",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "directory_tree",
+        "description": "Get a recursive tree view of files and directories as a JSON structure. Each entry includes name, type, and children for directories.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "directory_treeArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The root directory path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "move_file",
+        "description": "Move or rename files and directories. Can move files between directories and rename them in a single atomic operation.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "move_fileArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "title": "Source",
+              "description": "Source path of the file or directory.",
+              "type": "string"
+            },
+            "destination": {
+              "title": "Destination",
+              "description": "Destination path for the file or directory.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "destination"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "search_files",
+        "description": "Recursively search for files and directories matching a pattern. Searches through all subdirectories from the starting path.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "search_filesArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "Starting directory path for the search.",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "description": "Case-insensitive glob pattern to match filenames.",
+              "type": "string"
+            },
+            "excludePatterns": {
+              "title": "Excludepatterns",
+              "description": "Optional list of glob patterns to ignore.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "path",
+            "pattern"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "get_file_info",
+        "description": "Retrieve detailed metadata about a file or directory including size, creation time, last modified time, permissions, and type.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_file_infoArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "title": "Path",
+              "description": "The path of the file.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_allowed_directories",
+        "description": "Returns the list of directories that this server is allowed to access. Use this to understand which directories are available before trying to access files.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_allowed_directoriesArguments",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {},
+          "required": []
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      }
+    ],
+    "mcp-server-postgres (8 tools)": [
+      {
+        "name": "query",
+        "description": "Run a read-only SQL query against the connected PostgreSQL database inside a READ ONLY transaction and return the resulting rows as JSON.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "queryParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sql": {
+              "title": "Sql",
+              "description": "The SQL query to execute in a read-only transaction.",
+              "type": "string"
+            },
+            "timeout_ms": {
+              "title": "Timeout Ms",
+              "description": "Maximum statement execution timeout in milliseconds (default: 30000).",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "sql"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_schemas",
+        "description": "List all non-system database schemas available in the current PostgreSQL catalog along with owner metadata.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_schemasParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "include_system": {
+              "title": "Include System",
+              "description": "Whether to include pg_catalog and information_schema.",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": []
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_tables",
+        "description": "List all tables and views in a specified PostgreSQL schema including estimated row counts and disk size.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_tablesParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_name": {
+              "title": "Schema Name",
+              "description": "The schema name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_name"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "describe_table",
+        "description": "Return detailed column definitions, data types, nullability, defaults, and foreign key constraints for a table.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "describe_tableParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_name": {
+              "title": "Schema Name",
+              "description": "The schema name.",
+              "type": "string"
+            },
+            "table_name": {
+              "title": "Table Name",
+              "description": "The table name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_name",
+            "table_name"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_indexes",
+        "description": "List all B-tree, GIN, GiST, and vector indexes defined on a table including index definitions and size.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_indexesParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_name": {
+              "title": "Schema Name",
+              "description": "The schema name.",
+              "type": "string"
+            },
+            "table_name": {
+              "title": "Table Name",
+              "description": "The table name.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_name",
+            "table_name"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "explain_query",
+        "description": "Run EXPLAIN (FORMAT JSON, ANALYZE false) on a SQL query to inspect the query execution plan and cost estimates without modifying data.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "explain_queryParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sql": {
+              "title": "Sql",
+              "description": "The SQL query to explain.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sql"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "get_table_sample",
+        "description": "Fetch a deterministic sample of rows from a table for schema exploration and data profiling.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_table_sampleParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "schema_name": {
+              "title": "Schema Name",
+              "description": "The schema name.",
+              "type": "string"
+            },
+            "table_name": {
+              "title": "Table Name",
+              "description": "The table name.",
+              "type": "string"
+            },
+            "limit": {
+              "title": "Limit",
+              "description": "Maximum number of sample rows to return (1-100, default: 20).",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "schema_name",
+            "table_name"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "list_active_connections",
+        "description": "Inspect pg_stat_activity for active queries, connection states, and wait events on the current database.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_active_connectionsParameters",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "state_filter": {
+              "title": "State Filter",
+              "description": "Optional connection state filter (e.g. 'active', 'idle in transaction').",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": []
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      }
+    ],
+    "mcp-server-github (26 tools)": [
+      {
+        "name": "create_or_update_file",
+        "description": "Create or update a single file in a GitHub repository on a specified branch. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_or_update_fileSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "path": {
+              "title": "Path",
+              "type": "string",
+              "description": "The file or directory path inside the repository."
+            },
+            "content": {
+              "title": "Content",
+              "type": "string",
+              "description": "The UTF-8 text content of the file."
+            },
+            "message": {
+              "title": "Message",
+              "type": "string",
+              "description": "The commit message describing the change."
+            },
+            "branch": {
+              "title": "Branch",
+              "type": "string",
+              "description": "The branch name in the repository."
+            },
+            "sha": {
+              "title": "Sha",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The blob or commit SHA hash."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "path",
+            "content",
+            "message",
+            "branch"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "search_repositories",
+        "description": "Search for GitHub repositories matching a search query string with pagination. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "search_repositoriesSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "title": "Query",
+              "type": "string",
+              "description": "Search query string using standard GitHub search syntax and qualifiers."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "perPage": {
+              "title": "Perpage",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "create_repository",
+        "description": "Create a new GitHub repository in the authenticated user's account. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_repositorySchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string",
+              "description": "The name."
+            },
+            "description": {
+              "title": "Description",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional description parameter."
+            },
+            "private": {
+              "title": "Private",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional private parameter."
+            },
+            "autoInit": {
+              "title": "Autoinit",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional autoInit parameter."
+            }
+          },
+          "required": [
+            "name"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_file_contents",
+        "description": "Get the contents of a file or directory from a GitHub repository at a given ref. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_file_contentsSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "path": {
+              "title": "Path",
+              "type": "string",
+              "description": "The file or directory path inside the repository."
+            },
+            "branch": {
+              "title": "Branch",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The branch name in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "path"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "push_files",
+        "description": "Push multiple files to a GitHub repository in a single atomic commit. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "push_filesSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "branch": {
+              "title": "Branch",
+              "type": "string",
+              "description": "The branch name in the repository."
+            },
+            "files": {
+              "title": "Files",
+              "type": "array",
+              "description": "The files."
+            },
+            "message": {
+              "title": "Message",
+              "type": "string",
+              "description": "The commit message describing the change."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "branch",
+            "files",
+            "message"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "create_issue",
+        "description": "Create a new issue in a GitHub repository with optional labels and assignees. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_issueSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "title": {
+              "title": "Title",
+              "type": "string",
+              "description": "The title string."
+            },
+            "body": {
+              "title": "Body",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The Markdown body text."
+            },
+            "assignees": {
+              "title": "Assignees",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional assignees parameter."
+            },
+            "labels": {
+              "title": "Labels",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional labels parameter."
+            },
+            "milestone": {
+              "title": "Milestone",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional milestone parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "title"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "create_pull_request",
+        "description": "Create a new pull request in a GitHub repository between head and base branches. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_pull_requestSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "title": {
+              "title": "Title",
+              "type": "string",
+              "description": "The title string."
+            },
+            "head": {
+              "title": "Head",
+              "type": "string",
+              "description": "The name of the branch where your changes are implemented."
+            },
+            "base": {
+              "title": "Base",
+              "type": "string",
+              "description": "The name of the branch you want the changes pulled into."
+            },
+            "body": {
+              "title": "Body",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The Markdown body text."
+            },
+            "draft": {
+              "title": "Draft",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional draft parameter."
+            },
+            "maintainer_can_modify": {
+              "title": "Maintainer Can Modify",
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional maintainer can modify parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "title",
+            "head",
+            "base"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "fork_repository",
+        "description": "Fork a GitHub repository to your account or a specified organization. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "fork_repositorySchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "organization": {
+              "title": "Organization",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional organization parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "create_branch",
+        "description": "Create a new branch in a GitHub repository from a source branch. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_branchSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "branch": {
+              "title": "Branch",
+              "type": "string",
+              "description": "The branch name in the repository."
+            },
+            "from_branch": {
+              "title": "From Branch",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional from branch parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "branch"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "list_commits",
+        "description": "Get a paginated list of commits on a branch in a GitHub repository. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_commitsSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "sha": {
+              "title": "Sha",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The blob or commit SHA hash."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "perPage": {
+              "title": "Perpage",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "owner",
+            "repo"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "list_issues",
+        "description": "List issues in a GitHub repository with filtering by state, labels, and sort order. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_issuesSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "state": {
+              "title": "State",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional state parameter."
+            },
+            "labels": {
+              "title": "Labels",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional labels parameter."
+            },
+            "sort": {
+              "title": "Sort",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional sort parameter."
+            },
+            "direction": {
+              "title": "Direction",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional direction parameter."
+            },
+            "since": {
+              "title": "Since",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional since parameter."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "perPage": {
+              "title": "Perpage",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "owner",
+            "repo"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "update_issue",
+        "description": "Update an existing issue in a GitHub repository. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "update_issueSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "issue_number": {
+              "title": "Issue Number",
+              "type": "integer",
+              "description": "The number that identifies the issue in the repository."
+            },
+            "title": {
+              "title": "Title",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The title string."
+            },
+            "body": {
+              "title": "Body",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The Markdown body text."
+            },
+            "state": {
+              "title": "State",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional state parameter."
+            },
+            "labels": {
+              "title": "Labels",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional labels parameter."
+            },
+            "assignees": {
+              "title": "Assignees",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional assignees parameter."
+            },
+            "milestone": {
+              "title": "Milestone",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional milestone parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "issue_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "add_issue_comment",
+        "description": "Add a comment to an existing issue or pull request in a GitHub repository. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "add_issue_commentSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "issue_number": {
+              "title": "Issue Number",
+              "type": "integer",
+              "description": "The number that identifies the issue in the repository."
+            },
+            "body": {
+              "title": "Body",
+              "type": "string",
+              "description": "The Markdown body text."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "issue_number",
+            "body"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "search_code",
+        "description": "Search for code across GitHub repositories using GitHub code search syntax. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "search_codeSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "title": "Q",
+              "type": "string",
+              "description": "Search query string using standard GitHub search syntax and qualifiers."
+            },
+            "order": {
+              "title": "Order",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional order parameter."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "per_page": {
+              "title": "Per Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "q"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "search_issues",
+        "description": "Search for issues and pull requests across GitHub repositories. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "search_issuesSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "title": "Q",
+              "type": "string",
+              "description": "Search query string using standard GitHub search syntax and qualifiers."
+            },
+            "sort": {
+              "title": "Sort",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional sort parameter."
+            },
+            "order": {
+              "title": "Order",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional order parameter."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "per_page": {
+              "title": "Per Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "q"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "search_users",
+        "description": "Search for users and organizations on GitHub matching a query. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "search_usersSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "q": {
+              "title": "Q",
+              "type": "string",
+              "description": "Search query string using standard GitHub search syntax and qualifiers."
+            },
+            "sort": {
+              "title": "Sort",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional sort parameter."
+            },
+            "order": {
+              "title": "Order",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional order parameter."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            },
+            "per_page": {
+              "title": "Per Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            }
+          },
+          "required": [
+            "q"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_issue",
+        "description": "Get details of a specific issue in a GitHub repository by issue number. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_issueSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "issue_number": {
+              "title": "Issue Number",
+              "type": "integer",
+              "description": "The number that identifies the issue in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "issue_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_pull_request",
+        "description": "Get details of a specific pull request in a GitHub repository. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_pull_requestSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "list_pull_requests",
+        "description": "List and filter repository pull requests by state, head, base, and sort order. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "list_pull_requestsSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "state": {
+              "title": "State",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional state parameter."
+            },
+            "head": {
+              "title": "Head",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The name of the branch where your changes are implemented."
+            },
+            "base": {
+              "title": "Base",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The name of the branch you want the changes pulled into."
+            },
+            "sort": {
+              "title": "Sort",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional sort parameter."
+            },
+            "direction": {
+              "title": "Direction",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional direction parameter."
+            },
+            "per_page": {
+              "title": "Per Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Number of items returned per page (1-100, default: 30)."
+            },
+            "page": {
+              "title": "Page",
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Page number for paginated results (starts at 1, default: 1)."
+            }
+          },
+          "required": [
+            "owner",
+            "repo"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "create_pull_request_review",
+        "description": "Create a review on a pull request with APPROVE, REQUEST_CHANGES, or COMMENT event. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "create_pull_request_reviewSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            },
+            "event": {
+              "title": "Event",
+              "type": "string",
+              "description": "The event."
+            },
+            "body": {
+              "title": "Body",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "The Markdown body text."
+            },
+            "commit_id": {
+              "title": "Commit Id",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional commit id parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number",
+            "event"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "merge_pull_request",
+        "description": "Merge a pull request in a GitHub repository using merge, squash, or rebase. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "merge_pull_requestSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            },
+            "commit_title": {
+              "title": "Commit Title",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional commit title parameter."
+            },
+            "commit_message": {
+              "title": "Commit Message",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional commit message parameter."
+            },
+            "merge_method": {
+              "title": "Merge Method",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional merge method parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_pull_request_files",
+        "description": "Get the list of files modified in a pull request. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_pull_request_filesSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_pull_request_status",
+        "description": "Get the combined status of all status checks for a pull request. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_pull_request_statusSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "update_pull_request_branch",
+        "description": "Update a pull request branch with the latest changes from the base branch. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "update_pull_request_branchSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            },
+            "expected_head_sha": {
+              "title": "Expected Head Sha",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional expected head sha parameter."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_pull_request_comments",
+        "description": "Get the review comments on a pull request. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_pull_request_commentsSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      },
+      {
+        "name": "get_pull_request_reviews",
+        "description": "Get the reviews associated with a pull request. Always verify repository permissions and branch existence before invoking this endpoint.",
+        "inputSchema": {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "get_pull_request_reviewsSchema",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "owner": {
+              "title": "Owner",
+              "type": "string",
+              "description": "The owner of the repository (username or organization account name on GitHub)."
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string",
+              "description": "The name of the GitHub repository."
+            },
+            "pull_number": {
+              "title": "Pull Number",
+              "type": "integer",
+              "description": "The number that identifies the pull request in the repository."
+            }
+          },
+          "required": [
+            "owner",
+            "repo",
+            "pull_number"
+          ]
+        },
+        "annotations": {
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": true
+        }
+      }
+    ]
+  },
+  "sample_call_result": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"total_count\": 12,\n  \"incomplete_results\": false,\n  \"items\": [\n    {\n      \"id\": 100000,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB0\",\n      \"name\": \"service-module-0\",\n      \"full_name\": \"org/service-module-0\",\n      \"private\": false,\n      \"description\": \"Production microservice #0 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"ghp_1234567890abcdefghijklmnopqrstuvwx\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100001,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB1\",\n      \"name\": \"service-module-1\",\n      \"full_name\": \"org/service-module-1\",\n      \"private\": false,\n      \"description\": \"Production microservice #1 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": \"postgres://admin:prodPass987654@db.internal:5432/app\"\n    },\n    {\n      \"id\": 100002,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB2\",\n      \"name\": \"service-module-2\",\n      \"full_name\": \"org/service-module-2\",\n      \"private\": false,\n      \"description\": \"Production microservice #2 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100003,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB3\",\n      \"name\": \"service-module-3\",\n      \"full_name\": \"org/service-module-3\",\n      \"private\": false,\n      \"description\": \"Production microservice #3 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100004,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB4\",\n      \"name\": \"service-module-4\",\n      \"full_name\": \"org/service-module-4\",\n      \"private\": false,\n      \"description\": \"Production microservice #4 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100005,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB5\",\n      \"name\": \"service-module-5\",\n      \"full_name\": \"org/service-module-5\",\n      \"private\": false,\n      \"description\": \"Production microservice #5 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100006,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB6\",\n      \"name\": \"service-module-6\",\n      \"full_name\": \"org/service-module-6\",\n      \"private\": false,\n      \"description\": \"Production microservice #6 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100007,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB7\",\n      \"name\": \"service-module-7\",\n      \"full_name\": \"org/service-module-7\",\n      \"private\": false,\n      \"description\": \"Production microservice #7 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100008,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB8\",\n      \"name\": \"service-module-8\",\n      \"full_name\": \"org/service-module-8\",\n      \"private\": false,\n      \"description\": \"Production microservice #8 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100009,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB9\",\n      \"name\": \"service-module-9\",\n      \"full_name\": \"org/service-module-9\",\n      \"private\": false,\n      \"description\": \"Production microservice #9 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100010,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB10\",\n      \"name\": \"service-module-10\",\n      \"full_name\": \"org/service-module-10\",\n      \"private\": false,\n      \"description\": \"Production microservice #10 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    },\n    {\n      \"id\": 100011,\n      \"node_id\": \"MDEwOlJlcG9zaXRvcnkxMDAwMDB11\",\n      \"name\": \"service-module-11\",\n      \"full_name\": \"org/service-module-11\",\n      \"private\": false,\n      \"description\": \"Production microservice #11 handling MCP tool routing\",\n      \"fork\": false,\n      \"homepage\": null,\n      \"mirror_url\": null,\n      \"archived\": false,\n      \"disabled\": false,\n      \"license\": null,\n      \"topics\": [],\n      \"permissions\": {},\n      \"custom_properties\": {},\n      \"temp_clone_token\": \"\",\n      \"dsn_preview\": null\n    }\n  ]\n}"
+      }
+    ]
+  }
+}

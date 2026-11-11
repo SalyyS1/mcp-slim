@@ -7,53 +7,69 @@ import re
 from typing import Any
 
 # High-precision patterns covering modern LLM, cloud, and developer secrets.
-_SECRET_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
+# Every rule starts with a literal prefix (no leading `\b` or unanchored alternation)
+# and includes C-level substring triggers so CPython's `sre` engine uses Boyer-Moore
+# `fastsearch` instead of scanning character-by-character.
+_SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
     (
         "anthropic_api_key",
-        re.compile(r"\bsk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{20,}\b"),
+        ("sk-ant-",),
+        re.compile(r"sk-ant-(?:api03|admin01)-[A-Za-z0-9_-]{20,}"),
         "[REDACTED:ANTHROPIC_KEY]",
     ),
     (
         "openai_api_key",
+        ("sk-",),
         re.compile(
-            r"\bsk-(?:proj-|svcacct-|None-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{10,}\b|\bsk-proj-[A-Za-z0-9_-]{32,}\b"
+            r"sk-(?:(?:proj-|svcacct-|None-)?[A-Za-z0-9_-]{20,}T3BlbkFJ[A-Za-z0-9_-]{10,}|proj-[A-Za-z0-9_-]{32,})"
         ),
         "[REDACTED:OPENAI_KEY]",
     ),
     (
         "github_token",
-        re.compile(
-            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b|\bgithub_pat_[A-Za-z0-9_]{40,}\b"
-        ),
+        ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+        re.compile(r"gh[pousr]_[A-Za-z0-9]{30,}"),
+        "[REDACTED:GITHUB_TOKEN]",
+    ),
+    (
+        "github_token",
+        ("github_pat_",),
+        re.compile(r"github_pat_[A-Za-z0-9_]{40,}"),
         "[REDACTED:GITHUB_TOKEN]",
     ),
     (
         "aws_access_key",
-        re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"),
+        ("AKIA", "ASIA", "ABIA", "ACCA"),
+        re.compile(r"A(?:KIA|SIA|BIA|CCA)[0-9A-Z]{16}\b"),
         "[REDACTED:AWS_ACCESS_KEY]",
     ),
     (
         "google_api_key",
-        re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        ("AIza",),
+        re.compile(r"AIza[0-9A-Za-z_-]{35}\b"),
         "[REDACTED:GCP_API_KEY]",
     ),
     (
         "slack_token",
-        re.compile(r"\bxox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}\b"),
+        ("xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-"),
+        re.compile(r"xox[baprs]-[0-9]{10,13}-[0-9]{10,13}-[A-Za-z0-9]{24,}"),
         "[REDACTED:SLACK_TOKEN]",
     ),
     (
         "stripe_key",
-        re.compile(r"\b(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{24,}\b"),
+        ("sk_live_", "sk_test_", "rk_live_", "rk_test_"),
+        re.compile(r"[sr]k_(?:live|test)_[0-9a-zA-Z]{24,}"),
         "[REDACTED:STRIPE_KEY]",
     ),
     (
         "huggingface_token",
-        re.compile(r"\bhf_[A-Za-z0-9]{30,}\b"),
+        ("hf_",),
+        re.compile(r"hf_[A-Za-z0-9]{30,}"),
         "[REDACTED:HF_TOKEN]",
     ),
     (
         "private_key_block",
+        ("PRIVATE KEY-----",),
         re.compile(
             r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]+?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
         ),
@@ -61,22 +77,40 @@ _SECRET_RULES: tuple[tuple[str, re.Pattern[str], str], ...] = (
     ),
     (
         "jwt_token",
+        ("eyJ",),
         re.compile(
-            r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{16,}\b"
+            r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{16,}"
         ),
         "[REDACTED:JWT_TOKEN]",
     ),
     (
         "url_userinfo_secret",
-        re.compile(
-            r"((?:https?|postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^/\s:@]+:)([^@\s/]+)(@)"
-        ),
+        ("://",),
+        re.compile(r"(://[^/\s:@\"']+:)([^@\s/\"']+)(@)"),
         r"\1[REDACTED:URL_SECRET]\3",
     ),
     (
         "env_assignment_secret",
+        (
+            "API_KEY",
+            "SECRET_KEY",
+            "ACCESS_TOKEN",
+            "PRIVATE_KEY",
+            "AUTH_TOKEN",
+            "CLIENT_SECRET",
+            "DB_PASSWORD",
+            "DATABASE_PASSWORD",
+            "api_key",
+            "secret_key",
+            "access_token",
+            "private_key",
+            "auth_token",
+            "client_secret",
+            "db_password",
+            "database_password",
+        ),
         re.compile(
-            r"(?i)\b((?:[A-Z0-9_]*_)?(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?)([^\s'\",;}{]{8,})(['\"]?)"
+            r"(?i)((?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?)([^\s'\",;}{]{8,})(['\"]?)"
         ),
         r"\1[REDACTED:ENV_SECRET]\3",
     ),
@@ -108,7 +142,9 @@ class SecretGuard:
     if not self.enabled or not text:
       return text
     current = text
-    for name, pattern, replacement in _SECRET_RULES:
+    for name, triggers, pattern, replacement in _SECRET_RULES:
+      if not any(t in current for t in triggers):
+        continue
       current, count = pattern.subn(replacement, current)
       if count:
         self.report.record(name, count)

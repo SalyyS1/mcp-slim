@@ -12,7 +12,68 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _WHITESPACE_RUN = re.compile(r"[ \t]{2,}")
 _BLANK_LINES = re.compile(r"\n{3,}")
 
-# Redundant JSON Schema keys that LLMs do not need to invoke a tool.
+_ABBREV_EXPANSIONS: dict[str, set[str]] = {
+    "repo": {"repo", "repository"},
+    "dir": {"dir", "directory", "folder"},
+    "max": {"max", "maximum", "limit"},
+    "min": {"min", "minimum"},
+    "num": {"num", "number", "count"},
+    "msg": {"msg", "message"},
+    "id": {"id", "identifier"},
+    "str": {"str", "string"},
+    "int": {"int", "integer"},
+    "bool": {"bool", "boolean"},
+    "cfg": {"cfg", "config", "configuration"},
+    "env": {"env", "environment"},
+    "cmd": {"cmd", "command"},
+    "arg": {"arg", "argument"},
+    "args": {"args", "arguments"},
+    "param": {"param", "parameter"},
+    "params": {"params", "parameters"},
+}
+
+_STOP_WORDS = frozenset({
+    "the",
+    "a",
+    "an",
+    "to",
+    "of",
+    "for",
+    "in",
+    "on",
+    "at",
+    "by",
+    "with",
+    "from",
+    "value",
+    "name",
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "git",
+    "github",
+    "target",
+    "current",
+    "specified",
+    "given",
+    "optional",
+    "whether",
+})
+
+
+def _is_redundant_param_description(prop_name: str, desc: str) -> bool:
+  """Returns True when `desc` only restates `prop_name` using filler words."""
+  norm_desc_words = re.findall(r"[a-z0-9]+", desc.lower())
+  if not norm_desc_words or len(norm_desc_words) > 8:
+    return False
+  name_parts = [p for p in re.split(r"[^a-z0-9]+", prop_name.lower()) if p]
+  allowed_words = set(_STOP_WORDS)
+  for part in name_parts:
+    allowed_words.add(part)
+    allowed_words.add(part + "s")
+    allowed_words.update(_ABBREV_EXPANSIONS.get(part, ()))
+  return all(w in allowed_words for w in norm_desc_words)
 _REDUNDANT_SCHEMA_KEYS = frozenset({
     "$schema",
     "$id",
@@ -113,13 +174,7 @@ class SchemaSlimmer:
           slimmed_prop = self.slim_schema_node(prop_schema, is_root=False)
           if isinstance(slimmed_prop, dict):
             desc = slimmed_prop.get("description", "")
-            norm_name = prop_name.lower().replace("_", " ").strip()
-            norm_desc = desc.lower().rstrip(".").strip()
-            if norm_desc in (
-                norm_name,
-                f"the {norm_name}",
-                f"{norm_name} value",
-            ):
+            if desc and _is_redundant_param_description(prop_name, desc):
               slimmed_prop.pop("description", None)
           props[prop_name] = slimmed_prop
         out[k] = props
@@ -164,7 +219,7 @@ class SchemaSlimmer:
   def slim_tools_list(
       self, tools: list[dict[str, Any]], stats: SlimStats | None = None
   ) -> list[dict[str, Any]]:
-    before_tokens = estimate_tokens(tools)
+    before_tokens = estimate_tokens(tools) if stats is not None else 0
     filtered: list[dict[str, Any]] = []
     for tool in tools:
       name = tool.get("name", "")
@@ -173,8 +228,8 @@ class SchemaSlimmer:
       if name in self.deny_tools:
         continue
       filtered.append(self.slim_tool(tool))
-    after_tokens = estimate_tokens(filtered)
     if stats is not None:
+      after_tokens = estimate_tokens(filtered)
       stats.tools_total += len(tools)
       stats.tools_kept += len(filtered)
       stats.schema_tokens_before += before_tokens
@@ -255,23 +310,26 @@ class OutputSlimmer:
   def slim_call_result(
       self, result: dict[str, Any], stats: SlimStats | None = None
   ) -> dict[str, Any]:
-    before_tokens = estimate_tokens(result)
-    out = copy.deepcopy(result)
+    before_tokens = estimate_tokens(result) if stats is not None else 0
+    out = dict(result)
     content = out.get("content")
     if isinstance(content, list):
+      new_content: list[Any] = []
       for item in content:
         if isinstance(item, dict) and item.get("type") == "text":
           text = item.get("text")
           if isinstance(text, str):
-            item["text"] = self.slim_text(text)
+            item = {**item, "text": self.slim_text(text)}
+        new_content.append(item)
+      out["content"] = new_content
     if "structuredContent" in out and isinstance(
         out["structuredContent"], (dict, list)
     ):
       out["structuredContent"] = self.compact_json_value(
           out["structuredContent"]
       )
-    after_tokens = estimate_tokens(out)
     if stats is not None:
+      after_tokens = estimate_tokens(out)
       stats.output_tokens_before += before_tokens
       stats.output_tokens_after += after_tokens
     return out

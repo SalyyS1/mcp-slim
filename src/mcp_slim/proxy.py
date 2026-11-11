@@ -43,8 +43,8 @@ class MCPProxy:
       self._pending_methods[msg_id] = method
 
     if method == "tools/call" and isinstance(msg.get("params"), dict):
-      msg["params"] = self.secret_guard.redact_value(msg["params"])
-      return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+      serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+      return self.secret_guard.redact_text(serialized) + "\n"
 
     return raw_line
 
@@ -70,8 +70,9 @@ class MCPProxy:
           )
       elif method == "tools/call" or isinstance(result.get("content"), list):
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
-      msg["result"] = self.secret_guard.redact_value(result)
-      return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+      msg["result"] = result
+      serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+      return self.secret_guard.redact_text(serialized) + "\n"
 
     return raw_line
 

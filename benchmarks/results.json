@@ -1,0 +1,110 @@
+{
+  "environment": {
+    "python": "3.12.3",
+    "platform": "Linux-6.8.0-31-generic-x86_64-with-glibc2.39",
+    "processor": "x86_64",
+    "iterations": 5000
+  },
+  "token_compression": [
+    {
+      "name": "mcp-server-git (14 tools)",
+      "tools_count": 14,
+      "before_tokens": 1910,
+      "after_tokens": 990,
+      "saved_tokens": 920,
+      "reduction_pct": 48.2,
+      "raw_bytes": 7639,
+      "slim_bytes": 3959
+    },
+    {
+      "name": "mcp-server-filesystem (12 tools)",
+      "tools_count": 12,
+      "before_tokens": 2005,
+      "after_tokens": 971,
+      "saved_tokens": 1034,
+      "reduction_pct": 51.6,
+      "raw_bytes": 8017,
+      "slim_bytes": 3883
+    },
+    {
+      "name": "mcp-server-postgres (8 tools)",
+      "tools_count": 8,
+      "before_tokens": 1268,
+      "after_tokens": 648,
+      "saved_tokens": 620,
+      "reduction_pct": 48.9,
+      "raw_bytes": 5069,
+      "slim_bytes": 2595
+    },
+    {
+      "name": "mcp-server-github (26 tools)",
+      "tools_count": 26,
+      "before_tokens": 7331,
+      "after_tokens": 3864,
+      "saved_tokens": 3467,
+      "reduction_pct": 47.3,
+      "raw_bytes": 29323,
+      "slim_bytes": 15453
+    },
+    {
+      "name": "Combined Workspace (60 tools + call)",
+      "tools_count": 60,
+      "before_tokens": 14364,
+      "after_tokens": 7354,
+      "saved_tokens": 7010,
+      "reduction_pct": 48.8,
+      "raw_bytes": 57470,
+      "slim_bytes": 29438
+    }
+  ],
+  "latency_and_throughput": [
+    {
+      "stage": "SecretGuard.redact_text",
+      "payload_desc": "7,450 B JSON-RPC payload (12 rules)",
+      "iterations": 5000,
+      "p50_us": 169.3,
+      "p95_us": 222.8,
+      "p99_us": 256.8,
+      "mean_us": 167.8,
+      "msg_per_sec": 5910.3,
+      "mb_per_sec": 41.99,
+      "peak_mem_kib": 22.2
+    },
+    {
+      "stage": "SchemaSlimmer.slim_tools_list",
+      "payload_desc": "mcp-server-git (14 tools, 7,639 B)",
+      "iterations": 5000,
+      "p50_us": 705.4,
+      "p95_us": 815.5,
+      "p99_us": 927.9,
+      "mean_us": 708.2,
+      "msg_per_sec": 1408.4,
+      "mb_per_sec": 11.03,
+      "peak_mem_kib": 4.7
+    },
+    {
+      "stage": "OutputSlimmer.slim_call_result",
+      "payload_desc": "12-repo JSON result (3,940 B)",
+      "iterations": 5000,
+      "p50_us": 463.6,
+      "p95_us": 583.4,
+      "p99_us": 694.9,
+      "mean_us": 471.8,
+      "msg_per_sec": 2113.3,
+      "mb_per_sec": 15.01,
+      "peak_mem_kib": 17.1
+    },
+    {
+      "stage": "MCPProxy Full JSON-RPC Turn",
+      "payload_desc": "Request + Response + Slim + Guard",
+      "iterations": 5000,
+      "p50_us": 984.5,
+      "p95_us": 1262.5,
+      "p99_us": 1436.7,
+      "mean_us": 989.5,
+      "msg_per_sec": 1008.7,
+      "mb_per_sec": 7.24,
+      "peak_mem_kib": 24.4
+    }
+  ]
+}
