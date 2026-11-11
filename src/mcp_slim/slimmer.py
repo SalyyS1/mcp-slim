@@ -156,6 +156,7 @@ class SlimStats:
   refs_inlined: int = 0
   cache_hits: int = 0
   args_coerced: int = 0
+  blocked_calls: int = 0
 
   @property
   def total_tokens_before(self) -> int:

@@ -117,6 +117,30 @@ class MCPProxy:
           tool_name = params["name"]
           arguments = params["arguments"]
 
+      if isinstance(tool_name, str) and not self.schema_slimmer.is_tool_allowed(tool_name):
+        self.stats.blocked_calls += 1
+        blocked_payload = {
+            "jsonrpc": msg.get("jsonrpc", "2.0"),
+            "id": msg_id,
+            "result": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"[mcp-slim] Tool '{tool_name}' is blocked by proxy "
+                            "allow/deny policy."
+                        ),
+                    }
+                ],
+                "isError": True,
+            },
+        }
+        self._local_responses.append(
+            json.dumps(blocked_payload, ensure_ascii=False, separators=(",", ":"))
+            + "\n"
+        )
+        return ""
+
       if isinstance(tool_name, str) and isinstance(arguments, dict):
         arguments = self.schema_slimmer.coerce_arguments(
             tool_name, arguments, stats=self.stats

@@ -456,6 +456,41 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertIn("[Resource: repo://owner/repo/contents/README.md]", slimmed["content"][1]["text"])
     self.assertIn("# Project\n\nSome content with extra spaces.", slimmed["content"][1]["text"])
 
+  def test_proxy_enforces_allow_and_deny_policy_on_tool_calls(self) -> None:
+    proxy = MCPProxy(
+        schema_slimmer=SchemaSlimmer(
+            allow_tools={"search_*", "read_*"},
+            deny_tools={"delete_*"},
+        )
+    )
+    allowed_line = proxy.process_client_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {"name": "search_docs", "arguments": {"query": "mcp"}},
+        })
+    )
+    self.assertNotEqual(allowed_line, "")
+    self.assertEqual(proxy.pop_local_responses(), [])
+
+    blocked_line = proxy.process_client_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "tools/call",
+            "params": {"name": "delete_repository", "arguments": {"repo": "prod"}},
+        })
+    )
+    self.assertEqual(blocked_line, "")
+    local_replies = proxy.pop_local_responses()
+    self.assertEqual(len(local_replies), 1)
+    reply_obj = json.loads(local_replies[0])
+    self.assertEqual(reply_obj["id"], 11)
+    self.assertTrue(reply_obj["result"]["isError"])
+    self.assertIn("blocked by proxy allow/deny policy", reply_obj["result"]["content"][0]["text"])
+    self.assertEqual(proxy.stats.blocked_calls, 1)
+
 
 if __name__ == "__main__":
   unittest.main()
