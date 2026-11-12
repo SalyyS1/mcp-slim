@@ -296,6 +296,58 @@ class SchemaSlimmer:
             for mk, mv in merged.items():
               out.setdefault(mk, mv)
           continue
+        slimmed_branches = [
+            self.slim_schema_node(
+                branch, is_root=False, defs=defs, visited=visited, stats=stats
+            )
+            for branch in non_null
+        ]
+        if (
+            is_root
+            and slimmed_branches
+            and all(
+                isinstance(b, dict)
+                and b.get("type", "object") == "object"
+                and isinstance(b.get("properties"), dict)
+                for b in slimmed_branches
+            )
+        ):
+          merged_props: dict[str, Any] = dict(out.get("properties") or {})
+          branch_req_sets: list[list[str]] = []
+          for b in slimmed_branches:
+            for pk, pv in b["properties"].items():
+              merged_props.setdefault(pk, pv)
+            b_req = b.get("required")
+            if isinstance(b_req, list):
+              branch_req_sets.append([r for r in b_req if isinstance(r, str)])
+            else:
+              branch_req_sets.append([])
+          if self.canonical_sort:
+            merged_props = dict(sorted(merged_props.items()))
+          out["properties"] = merged_props
+          existing_req = [
+              r for r in (out.get("required") or []) if isinstance(r, str)
+          ]
+          if k == "allOf":
+            combined_req = list(existing_req)
+            for req_list in branch_req_sets:
+              for r in req_list:
+                if r not in combined_req:
+                  combined_req.append(r)
+          else:
+            common = (
+                set(branch_req_sets[0]).intersection(*branch_req_sets[1:])
+                if branch_req_sets
+                else set()
+            )
+            combined_req = list(existing_req)
+            if branch_req_sets:
+              for r in branch_req_sets[0]:
+                if r in common and r not in combined_req:
+                  combined_req.append(r)
+          if combined_req:
+            out["required"] = combined_req
+          continue
         out[k] = [
             self.slim_schema_node(
                 branch, is_root=False, defs=defs, visited=visited, stats=stats

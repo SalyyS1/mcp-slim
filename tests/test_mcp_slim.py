@@ -539,6 +539,40 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     slimmed_res = out_slimmer.slim_call_result(void_res)
     self.assertNotIn("structuredContent", slimmed_res)
 
+  def test_root_anyof_oneof_allof_object_flattening_for_legacy_clients(self) -> None:
+    slimmer = SchemaSlimmer()
+    modern_tool = {
+        "name": "lookup_target",
+        "description": "Lookup target by id or slug.",
+        "inputSchema": {
+            "type": "object",
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "org": {"type": "string"},
+                    },
+                    "required": ["id", "org"],
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "slug": {"type": "string"},
+                        "org": {"type": "string"},
+                    },
+                    "required": ["slug", "org"],
+                },
+            ],
+        },
+    }
+    slimmed = slimmer.slim_tool(modern_tool)
+    schema = slimmed["inputSchema"]
+    self.assertNotIn("anyOf", schema)
+    self.assertEqual(schema["type"], "object")
+    self.assertEqual(set(schema["properties"].keys()), {"id", "org", "slug"})
+    self.assertEqual(schema["required"], ["org"])
+
 
 if __name__ == "__main__":
   unittest.main()
