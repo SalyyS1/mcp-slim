@@ -86,7 +86,7 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
     (
         "url_userinfo_secret",
         ("://",),
-        re.compile(r"(://[^/\s:@\"']+:)([^@\s/\"']+)(@)"),
+        re.compile(r"(://[^/\s:@\"']+:)([^/\s\"']+)(@)"),
         r"\1[REDACTED:URL_SECRET]\3",
     ),
     (
@@ -94,6 +94,10 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
         (
             "?token=",
             "&token=",
+            "?private_token=",
+            "&private_token=",
+            "?oauth_token=",
+            "&oauth_token=",
             "?access_token=",
             "&access_token=",
             "?auth_token=",
@@ -110,7 +114,7 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
             "x-amz-signature=",
         ),
         re.compile(
-            r"(?i)([?&](?:token|access_token|auth_token|api_key|apikey|sig|signature|x-amz-signature|x-amz-security-token)=)([^&\s\"'#]{8,})"
+            r"(?i)([?&](?:token|private_token|oauth_token|access_token|auth_token|api_key|apikey|sig|signature|x-amz-signature|x-amz-security-token)=)([^&\s\"'#]{6,})"
         ),
         r"\1[REDACTED:URL_QUERY_SECRET]",
     ),

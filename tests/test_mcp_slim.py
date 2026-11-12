@@ -426,14 +426,19 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     guard = SecretGuard()
     raw = (
         '{"download_url": "https://raw.githubusercontent.com/org/private-repo/main/cfg.yaml?token=GHSAT0AAAAA1234567890ABCDEF", '
-        '"s3_url": "https://bucket.s3.amazonaws.com/file.zip?X-Amz-Algorithm=AWS4&X-Amz-Signature=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b"}'
+        '"s3_url": "https://bucket.s3.amazonaws.com/file.zip?X-Amz-Algorithm=AWS4&X-Amz-Signature=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b", '
+        '"git_url": "https://user:p?ss@git.example.com/g/r.git?private_token=SECRET12"}'
     )
     redacted = guard.redact_text(raw)
     self.assertNotIn("GHSAT0AAAAA1234567890ABCDEF", redacted)
     self.assertNotIn("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b", redacted)
+    self.assertNotIn("p?ss", redacted)
+    self.assertNotIn("SECRET12", redacted)
     self.assertIn("?token=[REDACTED:URL_QUERY_SECRET]", redacted)
     self.assertIn("&X-Amz-Signature=[REDACTED:URL_QUERY_SECRET]", redacted)
-    self.assertEqual(guard.report.by_category.get("url_query_secret"), 2)
+    self.assertIn("?private_token=[REDACTED:URL_QUERY_SECRET]", redacted)
+    self.assertEqual(guard.report.by_category.get("url_query_secret"), 3)
+    self.assertEqual(guard.report.by_category.get("url_userinfo_secret"), 1)
 
   def test_embedded_resource_flattening_and_slimming(self) -> None:
     slimmer = OutputSlimmer(flatten_resources=True)
