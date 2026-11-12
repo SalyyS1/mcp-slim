@@ -430,8 +430,41 @@ class SchemaSlimmer:
     if not expected_map:
       return arguments
 
-    out = dict(arguments)
-    for k, v in out.items():
+    out: dict[str, Any] = {}
+    used_keys = set(arguments.keys())
+    for orig_k, orig_v in arguments.items():
+      if orig_k in expected_map:
+        out[orig_k] = orig_v
+        continue
+      norm_k = re.sub(r"[_-]", "", orig_k).lower()
+      if len(norm_k) > 4 and norm_k.endswith("ies"):
+        norm_k_singular = norm_k[:-3] + "y"
+      elif len(norm_k) > 3 and norm_k.endswith("s"):
+        norm_k_singular = norm_k[:-1]
+      else:
+        norm_k_singular = norm_k
+      candidates = [
+          decl_k
+          for decl_k in expected_map
+          if decl_k not in used_keys
+          and (
+              re.sub(r"[_-]", "", decl_k).lower() in (norm_k, norm_k_singular)
+              or (
+                  len(decl_k) > 3
+                  and re.sub(r"[_-]", "", decl_k).lower().rstrip("s") == norm_k_singular
+              )
+          )
+      ]
+      if len(candidates) == 1:
+        healed_k = candidates[0]
+        out[healed_k] = orig_v
+        used_keys.add(healed_k)
+        if stats is not None:
+          stats.args_coerced += 1
+      else:
+        out[orig_k] = orig_v
+
+    for k, v in list(out.items()):
       if not isinstance(v, str):
         continue
       expected = expected_map.get(k)

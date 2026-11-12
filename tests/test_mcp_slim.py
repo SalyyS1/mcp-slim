@@ -348,14 +348,15 @@ class TestMCPProxyAndCLI(unittest.TestCase):
             "method": "tools/call",
             "params": {
                 "name": "search_repositories",
-                "arguments": {"query": "mcp", "page": "2", "perPage": "50"},
+                "arguments": {"queries": "mcp", "page": "2", "per_page": "50"},
             },
         })
     )
     forwarded = json.loads(call_str)
+    self.assertEqual(forwarded["params"]["arguments"]["query"], "mcp")
     self.assertEqual(forwarded["params"]["arguments"]["page"], 2)
     self.assertEqual(forwarded["params"]["arguments"]["perPage"], 50)
-    self.assertEqual(proxy.stats.args_coerced, 2)
+    self.assertEqual(proxy.stats.args_coerced, 4)
 
   def test_tool_poisoning_and_prompt_injection_redaction(self) -> None:
     guard = SecretGuard()
