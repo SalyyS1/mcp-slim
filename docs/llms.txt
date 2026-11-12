@@ -1,9 +1,14 @@
-# mcp-slim
-> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% tokens) and Real-Time Secret Redaction (~0.93 ms p50).
+# mcp-slim (v0.6.0)
+> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% tokens), Cross-LLM `$defs/$ref` Inlining, Real-Time Secret Redaction (~0.93 ms p50), and Cumulative Cost Telemetry.
 
 - Repository: https://github.com/SalyyS1/mcp-slim
+- Live Interactive Playground: https://salyys1.github.io/mcp-slim/
 - Author: SalyyS1 (https://github.com/SalyyS1)
 - License: MIT
-- Install: `pip install git+https://github.com/SalyyS1/mcp-slim.git`
+- Zero-Install (uvx): `uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim --benchmark`
+- Zero-Install (npx): `npx -y github:SalyyS1/mcp-slim --benchmark`
+- Install (pip): `pip install git+https://github.com/SalyyS1/mcp-slim.git`
 - Wrap Config: `mcp-slim wrap -i ~/.cursor/mcp.json`
+- View Savings Ledger: `mcp-slim stats`
+- GitHub Action: `uses: SalyyS1/mcp-slim@main`
 - Companion Project: [loraspectra](https://github.com/SalyyS1/loraspectra) — Spectral SVD Auditor, Dynamic Rank Compressor & Orthogonal Merger for `.safetensors` LoRA Adapters.

@@ -151,6 +151,8 @@ class SlimStats:
   schema_tokens_after: int = 0
   output_tokens_before: int = 0
   output_tokens_after: int = 0
+  wire_bytes_before: int = 0
+  wire_bytes_after: int = 0
   tools_total: int = 0
   tools_kept: int = 0
   refs_inlined: int = 0
@@ -169,6 +171,10 @@ class SlimStats:
   @property
   def tokens_saved(self) -> int:
     return max(0, self.total_tokens_before - self.total_tokens_after)
+
+  @property
+  def wire_bytes_saved(self) -> int:
+    return max(0, self.wire_bytes_before - self.wire_bytes_after)
 
   @property
   def reduction_pct(self) -> float:

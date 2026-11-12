@@ -1,0 +1,63 @@
+name: "MCP Slim Schema & Token Audit"
+description: "Audit MCP tool schemas in CI for context token bloat, Gemini/Vertex $defs/$ref compatibility, and lazy discovery savings."
+author: "SalyyS1"
+
+branding:
+  icon: "zap"
+  color: "green"
+
+inputs:
+  manifest:
+    description: "Path to an MCP tools JSON manifest or workload fixture (runs built-in sample audit if omitted)."
+    required: false
+    default: ""
+  python-version:
+    description: "Python version to set up for running mcp-slim (requires >= 3.10)."
+    required: false
+    default: "3.12"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Run MCP Slim Schema & Token Audit
+      id: audit
+      shell: bash
+      env:
+        INPUT_MANIFEST: ${{ inputs.manifest }}
+        ACTION_SRC: ${{ github.action_path }}/src
+      run: |
+        set -euo pipefail
+        export PYTHONPATH="${ACTION_SRC}${PYTHONPATH:+:${PYTHONPATH}}"
+        REPORT_FILE="$(mktemp)"
+        trap 'rm -f "${REPORT_FILE}"' EXIT
+
+        set +e
+        if [ -n "${INPUT_MANIFEST}" ]; then
+          python3 -m mcp_slim.cli audit "${INPUT_MANIFEST}" | tee "${REPORT_FILE}"
+          EXIT_CODE="${PIPESTATUS[0]}"
+        else
+          python3 -m mcp_slim.cli audit | tee "${REPORT_FILE}"
+          EXIT_CODE="${PIPESTATUS[0]}"
+        fi
+        set -e
+
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ] && [ -s "${REPORT_FILE}" ]; then
+          {
+            echo "### ⚡ MCP Slim Schema & Token Audit"
+            if [ -n "${INPUT_MANIFEST}" ]; then
+              echo ""
+              echo "Manifest: \`${INPUT_MANIFEST}\`"
+            fi
+            echo ""
+            echo '```text'
+            cat "${REPORT_FILE}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+        fi
+
+        exit "${EXIT_CODE}"

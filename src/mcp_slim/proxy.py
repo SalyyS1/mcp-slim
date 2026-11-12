@@ -11,6 +11,7 @@ from typing import Any, Callable, Awaitable
 
 from .guard import SecretGuard
 from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
+from .telemetry import StatsLedger
 
 _READ_ONLY_PREFIXES = (
     "get_",
@@ -43,6 +44,8 @@ class MCPProxy:
       quiet: bool = False,
       cli_only: bool = False,
       bridge_socket: str | None = None,
+      no_stats: bool = False,
+      stats_ledger: StatsLedger | None = None,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -56,6 +59,12 @@ class MCPProxy:
     self.quiet = quiet
     self.cli_only = cli_only
     self.bridge_socket = bridge_socket
+    self.no_stats = no_stats
+    self.stats_ledger = (
+        stats_ledger
+        if stats_ledger is not None
+        else StatsLedger(enabled=not no_stats)
+    )
     self._pending_methods: dict[str | int, str] = {}
     self._pending_cache_keys: dict[str | int, str] = {}
     self._read_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -256,7 +265,10 @@ class MCPProxy:
             )
         except json.JSONDecodeError:
           pass
-      return redacted_str + "\n"
+      out_line = redacted_str + "\n"
+      self.stats.wire_bytes_before += len(raw_line.encode("utf-8"))
+      self.stats.wire_bytes_after += len(out_line.encode("utf-8"))
+      return out_line
 
     if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
       waiter = self._bridge_waiters.pop(msg_id)
@@ -332,6 +344,21 @@ class MCPProxy:
       return {"ok": True, "response": resp}
 
     return {"ok": False, "error": f"Unsupported bridge action: {action}"}
+
+  def record_telemetry(
+      self,
+      command: list[str] | None = None,
+      server_label: str | None = None,
+  ) -> dict[str, Any] | None:
+    """Persists cumulative proxy metrics when telemetry is enabled."""
+    if self.no_stats or self.stats_ledger is None:
+      return None
+    return self.stats_ledger.record_session(
+        self.stats,
+        command=command,
+        server_label=server_label,
+        secrets_redacted=self.secret_guard.report.total_redactions,
+    )
 
   async def run_stdio(self, command: list[str]) -> int:
     """Spawns the upstream MCP server and proxies stdio streams."""
@@ -425,18 +452,22 @@ class MCPProxy:
       except (BrokenPipeError, ConnectionResetError):
         pass
 
+    rc = 0
     try:
-      await asyncio.gather(forward_client_to_server(), forward_server_to_client())
+      try:
+        await asyncio.gather(forward_client_to_server(), forward_server_to_client())
+      finally:
+        if bridge_server is not None:
+          bridge_server.close()
+          await bridge_server.wait_closed()
+          try:
+            if self.bridge_socket and os.path.exists(self.bridge_socket):
+              os.unlink(self.bridge_socket)
+          except OSError:
+            pass
+      rc = await proc.wait()
     finally:
-      if bridge_server is not None:
-        bridge_server.close()
-        await bridge_server.wait_closed()
-        try:
-          if self.bridge_socket and os.path.exists(self.bridge_socket):
-            os.unlink(self.bridge_socket)
-        except OSError:
-          pass
-    rc = await proc.wait()
+      self.record_telemetry(command=command)
     if not self.quiet and self.stats.total_tokens_before > 0:
       sys.stderr.write(
           f"[mcp-slim] Session complete: {self.stats.total_tokens_before} -> "

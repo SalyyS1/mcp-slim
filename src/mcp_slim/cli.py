@@ -19,6 +19,7 @@ from .slimmer import (
     SlimStats,
     estimate_tokens,
 )
+from .telemetry import StatsLedger
 
 SAMPLE_BENCHMARK_TOOLS: list[dict[str, Any]] = [
     {
@@ -424,8 +425,31 @@ def run_bridge_cli(
     return 1
 
 
+def run_stats(
+    json_output: bool = False,
+    reset: bool = False,
+    stats_file: Path | None = None,
+) -> int:
+  ledger = StatsLedger(path=stats_file)
+  if reset:
+    ledger.reset()
+    if json_output:
+      print(json.dumps(ledger.summary(), indent=2, ensure_ascii=False))
+    else:
+      print(f"Reset mcp-slim telemetry ledger at {ledger.path}")
+    return 0
+  if json_output:
+    print(json.dumps(ledger.summary(), indent=2, ensure_ascii=False))
+    return 0
+  print(ledger.format_dashboard())
+  return 0
+
+
 def wrap_config(
-    config_path: Path, in_place: bool = False, lazy: bool = False
+    config_path: Path,
+    in_place: bool = False,
+    lazy: bool = False,
+    runner: str = "mcp-slim",
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -439,11 +463,30 @@ def wrap_config(
       continue
     cmd = spec.get("command")
     args = spec.get("args", [])
-    if not isinstance(cmd, str) or cmd == "mcp-slim":
+    arg_strs = [str(a) for a in args] if isinstance(args, list) else []
+    if (
+        not isinstance(cmd, str)
+        or cmd == "mcp-slim"
+        or any("SalyyS1/mcp-slim" in a or a == "mcp-slim" for a in arg_strs)
+    ):
       continue
-    spec["command"] = "mcp-slim"
     prefix = ["run", "--lazy", "--"] if lazy else ["run", "--"]
-    spec["args"] = [*prefix, cmd, *(args if isinstance(args, list) else [])]
+    if runner == "npx":
+      spec["command"] = "npx"
+      spec["args"] = ["-y", "github:SalyyS1/mcp-slim", *prefix, cmd, *arg_strs]
+    elif runner == "uvx":
+      spec["command"] = "uvx"
+      spec["args"] = [
+          "--from",
+          "git+https://github.com/SalyyS1/mcp-slim",
+          "mcp-slim",
+          *prefix,
+          cmd,
+          *arg_strs,
+      ]
+    else:
+      spec["command"] = "mcp-slim"
+      spec["args"] = [*prefix, cmd, *arg_strs]
     wrapped_count += 1
 
   formatted = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
@@ -470,6 +513,11 @@ def main(argv: list[str] | None = None) -> int:
   )
   parser.add_argument(
       "--version", action="version", version=f"mcp-slim {__version__}"
+  )
+  parser.add_argument(
+      "--benchmark",
+      action="store_true",
+      help="Run built-in token compression & security benchmark",
   )
   sub = parser.add_subparsers(dest="subcommand")
 
@@ -513,6 +561,17 @@ def main(argv: list[str] | None = None) -> int:
       "--no-secret-guard",
       action="store_true",
       help="Disable bidirectional secret redaction",
+  )
+  run_p.add_argument(
+      "--no-stats",
+      action="store_true",
+      help="Disable persistent token & cost telemetry for this session (or set MCP_SLIM_NO_STATS=1)",
+  )
+  run_p.add_argument(
+      "--stats-file",
+      type=Path,
+      default=None,
+      help="Custom path to telemetry ledger JSON file (default: ~/.mcp-slim/stats.json)",
   )
   run_p.add_argument(
       "--quiet",
@@ -578,6 +637,12 @@ def main(argv: list[str] | None = None) -> int:
       action="store_true",
       help="Wrap servers with --lazy on-demand discovery mode",
   )
+  wrap_p.add_argument(
+      "--runner",
+      choices=("mcp-slim", "uvx", "npx"),
+      default="mcp-slim",
+      help="Launcher command written to mcpServers (default: mcp-slim)",
+  )
 
   audit_p = sub.add_parser(
       "audit",
@@ -601,12 +666,41 @@ def main(argv: list[str] | None = None) -> int:
       help="Live MCP server command to inspect (after '--')",
   )
 
+  stats_p = sub.add_parser(
+      "stats",
+      help="Display cumulative token, wire-byte, and estimated API cost savings",
+  )
+  stats_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit cumulative telemetry metrics as JSON",
+  )
+  stats_p.add_argument(
+      "--reset",
+      action="store_true",
+      help="Reset cumulative telemetry statistics",
+  )
+  stats_p.add_argument(
+      "--stats-file",
+      type=Path,
+      default=None,
+      help="Path to stats JSON file (overrides MCP_SLIM_STATS_PATH)",
+  )
+
   sub.add_parser("benchmark", help="Run built-in token compression & security benchmark")
 
   parsed = parser.parse_args(args_list)
 
-  if parsed.subcommand == "benchmark":
+  if parsed.benchmark or parsed.subcommand == "benchmark":
     return run_benchmark()
+
+  if parsed.subcommand == "stats":
+    return run_stats(
+        json_output=parsed.json_output,
+        reset=parsed.reset,
+        stats_file=parsed.stats_file,
+    )
 
   if parsed.subcommand == "audit":
     return run_audit(parsed.file)
@@ -620,7 +714,12 @@ def main(argv: list[str] | None = None) -> int:
     return run_inspect(cmd)
 
   if parsed.subcommand == "wrap":
-    return wrap_config(parsed.config, in_place=parsed.in_place, lazy=parsed.lazy)
+    return wrap_config(
+        parsed.config,
+        in_place=parsed.in_place,
+        lazy=parsed.lazy,
+        runner=parsed.runner,
+    )
 
   if parsed.subcommand == "bridge":
     return run_bridge_cli(
@@ -660,6 +759,10 @@ def main(argv: list[str] | None = None) -> int:
         quiet=parsed.quiet,
         cli_only=parsed.cli_only,
         bridge_socket=parsed.bridge_socket,
+        no_stats=parsed.no_stats,
+        stats_ledger=StatsLedger(
+            path=parsed.stats_file, enabled=not parsed.no_stats
+        ),
     )
     return asyncio.run(proxy.run_stdio(cmd))
 

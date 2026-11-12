@@ -1,0 +1,39 @@
+{
+  "name": "mcp-slim",
+  "version": "0.6.0",
+  "description": "Zero-dependency MCP JSON-RPC 2.0 stdio proxy for context token compression (-48.8% to -98.7%), $defs/$ref inlining, secret redaction, and cumulative cost telemetry.",
+  "license": "MIT",
+  "author": "SalyyS1",
+  "homepage": "https://salyys1.github.io/mcp-slim/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SalyyS1/mcp-slim.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SalyyS1/mcp-slim/issues"
+  },
+  "bin": {
+    "mcp-slim": "bin/mcp-slim.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "cursor",
+    "windsurf",
+    "claude-desktop",
+    "token-compression",
+    "secret-redaction",
+    "json-rpc",
+    "ai-agents"
+  ]
+}

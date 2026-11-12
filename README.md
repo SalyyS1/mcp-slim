@@ -3,10 +3,15 @@
 **Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% Tokens), Cross-LLM `$ref` Inlining, On-Demand Tool Discovery, and Real-Time Secret Redaction**
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
+[![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
+[![Version: v0.6.0](https://img.shields.io/badge/version-v0.6.0-blue)](https://github.com/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
+[![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-2ea043)](https://github.com/SalyyS1/mcp-slim/blob/main/pyproject.toml)
 [![Protocol: MCP JSON-RPC 2.0](https://img.shields.io/badge/MCP-JSON--RPC%202.0-1f6feb)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray.svg)](https://github.com/SalyyS1/mcp-slim/blob/main/LICENSE)
+
+> **Try Instantly in Your Browser (Zero Install, 100% Client-Side):** [**Interactive MCP Token & Security Playground (`https://salyys1.github.io/mcp-slim/`) &rarr;**](https://salyys1.github.io/mcp-slim/) — paste any `tools/list`, `tools/call`, or `mcp.json` config to preview token savings, `$defs/$ref` inlining, secret redaction, and monthly API USD savings live.
 
 ![mcp-slim Live Audit & Stdio Proxy Demo](assets/terminal-demo.svg)
 
@@ -38,9 +43,10 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.5.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.6.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
+| **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
 | **Static `tools/list` Schema Minification** | No | No | Yes | No | **Yes (-48.3% to -57.4% tokens)** |
 | **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
@@ -50,7 +56,8 @@ flowchart LR
 | **`tools/call` Valid-JSON, NDJSON & Head+Tail Log Compaction** | No | No | No | No | **Yes (-43%+ output tokens, preserves stack-trace head & tail)** |
 | **Read-Only Tool Call TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (Auto-invalidated on mutations)** |
 | **Secret Redaction & Tool-Poisoning / Prompt-Injection Shield** | No | No | No | No | **Yes (13 categories, `141 µs` p50)** |
-| **Live Stdio Server Inspector (`mcp-slim inspect`)** | No | No | No | No | **Yes (`mcp-slim inspect -- <cmd>`)** |
+| **Persistent Token & API Cost Telemetry (`mcp-slim stats`)** | No | No | No | No | **Yes (Per-server ledger + model USD savings)** |
+| **Live Stdio Inspector & CI GitHub Action (`audit`)** | No | No | No | No | **Yes (`mcp-slim inspect` & `SalyyS1/mcp-slim@main`)** |
 
 ---
 
@@ -88,13 +95,23 @@ Measured over **N = 5,000 iterations** on Python 3.11 (`linux x86_64`) using `ti
 
 ## Installation & Quick Start
 
-### 1. Install
+> **No CLI setup needed to try it first:** Open the [**Interactive Browser Playground (`https://salyys1.github.io/mcp-slim/`)**](https://salyys1.github.io/mcp-slim/) to test live schema/output compression, `$defs/$ref` fixing, secret redaction, and 1-click `mcp.json` wrapping offline in your browser.
 
-`mcp-slim` requires Python 3.10+ and has zero third-party runtime dependencies:
+### 1. Run Immediately (Zero-Install `uvx` / `npx` or `pip install`)
+
+`mcp-slim` requires Python 3.10+ and has **zero** third-party runtime dependencies. Run it directly via `uvx` or `npx` without installing anything globally, or install via `pip` / `uv`:
 
 ```bash
+# Zero-install via uvx:
+uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim --benchmark
+uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim inspect -- npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# Zero-install via npx (for Cursor / Claude Desktop Node.js workflows):
+npx -y github:SalyyS1/mcp-slim --benchmark
+npx -y github:SalyyS1/mcp-slim wrap --runner npx -i ~/.cursor/mcp.json
+
+# Or install persistently with pip / uv:
 pip install git+https://github.com/SalyyS1/mcp-slim.git
-# or with uv:
 uv tool install git+https://github.com/SalyyS1/mcp-slim.git
 ```
 
@@ -108,6 +125,10 @@ mcp-slim wrap -i ~/.cursor/mcp.json
 
 # Or enable On-Demand Lazy Discovery (-98.7% static schema tokens):
 mcp-slim wrap --lazy -i ~/.cursor/mcp.json
+
+# Zero-install config wrapping using uvx or npx runners directly inside mcp.json:
+uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim wrap --runner uvx -i ~/.cursor/mcp.json
+npx -y github:SalyyS1/mcp-slim wrap --runner npx -i ~/.cursor/mcp.json
 ```
 
 ### 3. Inspect a Live MCP Server or Static Schema Manifest
@@ -136,6 +157,70 @@ read_file                        |       238 |       110 |    -53.8% |     ok
 Standard SchemaSlimmer : 12512 -> 6470 tokens (-48.3%, inlined 0 $ref definitions)
 Lazy Discovery (--lazy): 12512 -> 168 tokens (-98.7% via 2 on-demand meta-tools)
 ==============================================================================
+```
+
+### 4. View Cumulative Token & API Cost Savings (`mcp-slim stats`)
+
+Every `mcp-slim run` session atomically records token, wire-byte, reliability, and security counters in `~/.mcp-slim/stats.json` (disableable per session via `--no-stats` or globally via `MCP_SLIM_NO_STATS=1`):
+
+```bash
+mcp-slim stats            # Render interactive ASCII savings & model cost dashboard
+mcp-slim stats --json     # Export machine-readable JSON telemetry summary
+mcp-slim stats --reset    # Reset cumulative telemetry counters
+```
+
+Output:
+```text
+mcp-slim Cumulative Token & Cost Savings Dashboard
+==============================================================================
+Ledger File : ~/.mcp-slim/stats.json
+Sessions    : 2   |   Last Updated : 2026-11-12T13:45:00Z
+------------------------------------------------------------------------------
+TRAFFIC STAGE                |       BEFORE |        AFTER |              SAVED
+------------------------------------------------------------------------------
+tools/list Schemas           |       25,024 |       12,940 |   12,084 (-48.3%)
+tools/call Outputs           |        3,704 |        1,768 |    1,936 (-52.3%)
+Total Context Tokens         |       28,728 |       14,708 |   14,020 (-48.8%)
+JSON-RPC Wire Payload        |   112.25 KiB |    57.50 KiB | 54.75 KiB (-48.8%)
+==============================================================================
+Estimated API Input Cost Saved (Input-Rate Estimates)
+MODEL (INPUT RATE)                   |  CUMULATIVE SAVED | 30D @ 100 TURNS/DAY
+------------------------------------------------------------------------------
+Claude Opus 4 ($15.00/1M)            |            $0.210 |         ~$315.45/mo
+Claude Sonnet 4 ($3.00/1M)           |            $0.042 |          ~$63.09/mo
+GPT-4o ($2.50/1M)                    |            $0.035 |          ~$52.58/mo
+Gemini 2.5 Pro ($1.25/1M)            |            $0.018 |          ~$26.29/mo
+==============================================================================
+Reliability & Security Shield Counters
+------------------------------------------------------------------------------
+  $defs/$ref Pointers Inlined : 6           Read-Cache Hits     : 9
+  Stringified Args Coerced    : 3           Secrets Redacted    : 4
+  Policy-Blocked Tool Calls   : 0
+==============================================================================
+SERVER                         | SESSIONS |   RAW TOK |  SLIM TOK |    SAVED | SECRETS
+------------------------------------------------------------------------------
+@modelcontextprotocol/server-g |        1 |    16,510 |     8,612 |   -47.8% |       3
+mcp-server-git                 |        1 |    12,218 |     6,096 |   -50.1% |       1
+==============================================================================
+```
+
+### 5. CI Schema & Token Audit GitHub Action (`uses: SalyyS1/mcp-slim@main`)
+
+Catch MCP context bloat and Gemini/Vertex AI `$defs`/`$ref` incompatibilities automatically on pull requests and publish the audit table directly to `$GITHUB_STEP_SUMMARY`:
+
+```yaml
+name: MCP Schema Audit
+on: [push, pull_request]
+
+jobs:
+  mcp-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit MCP Tool Schemas & Token Footprint
+        uses: SalyyS1/mcp-slim@main
+        with:
+          manifest: benchmarks/fixtures/real_mcp_workload.json
 ```
 
 ---
