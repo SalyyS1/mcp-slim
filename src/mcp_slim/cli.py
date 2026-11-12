@@ -362,6 +362,68 @@ def run_inspect(command: list[str]) -> int:
   return _print_tools_audit(tools, label=" ".join(command[:2]))
 
 
+async def _send_bridge_command(socket_path: str, payload: dict[str, Any]) -> dict[str, Any]:
+  reader, writer = await asyncio.open_unix_connection(socket_path)
+  try:
+    writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+    await writer.drain()
+    line = await reader.readline()
+    if not line:
+      raise RuntimeError("Empty response from mcp-slim bridge socket")
+    return json.loads(line.decode("utf-8", errors="replace"))
+  finally:
+    writer.close()
+
+
+def run_bridge_cli(
+    socket_path: str,
+    tool: str | None = None,
+    args_json: str | None = None,
+    show_schema: bool = False,
+) -> int:
+  try:
+    if not tool:
+      res = asyncio.run(_send_bridge_command(socket_path, {"action": "list"}))
+      if not res.get("ok"):
+        sys.stderr.write(f"Bridge error: {res.get('error')}\n")
+        return 1
+      for t in res.get("tools", []):
+        print(f"{t.get('name', ''):<30} {t.get('description', '')}")
+      return 0
+
+    if show_schema:
+      res = asyncio.run(
+          _send_bridge_command(socket_path, {"action": "schema", "tool": tool})
+      )
+      if not res.get("ok"):
+        sys.stderr.write(f"Bridge error: {res.get('error')}\n")
+        return 1
+      print(json.dumps(res.get("tool", {}), indent=2, ensure_ascii=False))
+      return 0
+
+    parsed_args = json.loads(args_json) if args_json else {}
+    res = asyncio.run(
+        _send_bridge_command(
+            socket_path,
+            {"action": "call", "tool": tool, "arguments": parsed_args},
+        )
+    )
+    if not res.get("ok"):
+      sys.stderr.write(f"Bridge error: {res.get('error')}\n")
+      return 1
+    rpc_resp = res.get("response", {})
+    result = rpc_resp.get("result", {}) if isinstance(rpc_resp, dict) else {}
+    content = result.get("content", []) if isinstance(result, dict) else []
+    if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict) and content[0].get("type") == "text":
+      sys.stdout.write(str(content[0].get("text", "")) + "\n")
+    else:
+      print(json.dumps(result or rpc_resp, indent=2, ensure_ascii=False))
+    return 1 if isinstance(result, dict) and result.get("isError") else 0
+  except Exception as exc:
+    sys.stderr.write(f"Bridge call failed: {exc}\n")
+    return 1
+
+
 def wrap_config(
     config_path: Path, in_place: bool = False, lazy: bool = False
 ) -> int:
@@ -458,9 +520,49 @@ def main(argv: list[str] | None = None) -> int:
       help="Suppress session summary on stderr",
   )
   run_p.add_argument(
+      "--bridge-socket",
+      type=str,
+      default=None,
+      help="Expose a local Unix domain socket so CLI processes can inspect schemas and call tools over the live MCP session",
+  )
+  run_p.add_argument(
+      "--cli-only",
+      action="store_true",
+      help="Return an empty tools/list to the MCP host so 0 schema tokens enter the LLM context while tools remain callable via --bridge-socket",
+  )
+  run_p.add_argument(
       "command",
       nargs=argparse.REMAINDER,
       help="Upstream command to execute (after '--')",
+  )
+
+  bridge_p = sub.add_parser(
+      "bridge",
+      help="List tools, inspect on-demand schemas, or call a tool over a running --bridge-socket session",
+  )
+  bridge_p.add_argument(
+      "--socket",
+      "-s",
+      required=True,
+      type=str,
+      help="Path to the active mcp-slim Unix domain socket",
+  )
+  bridge_p.add_argument(
+      "--schema",
+      action="store_true",
+      help="Print the compacted JSON Schema for the specified tool",
+  )
+  bridge_p.add_argument(
+      "tool",
+      nargs="?",
+      default=None,
+      help="Tool name to inspect or invoke (omit to list all tools)",
+  )
+  bridge_p.add_argument(
+      "args_json",
+      nargs="?",
+      default=None,
+      help="JSON object string of tool arguments (e.g. '{\"query\": \"mcp\"}')",
   )
 
   wrap_p = sub.add_parser(
@@ -520,6 +622,14 @@ def main(argv: list[str] | None = None) -> int:
   if parsed.subcommand == "wrap":
     return wrap_config(parsed.config, in_place=parsed.in_place, lazy=parsed.lazy)
 
+  if parsed.subcommand == "bridge":
+    return run_bridge_cli(
+        socket_path=parsed.socket,
+        tool=parsed.tool,
+        args_json=parsed.args_json,
+        show_schema=parsed.schema,
+    )
+
   if parsed.subcommand == "run":
     cmd = list(parsed.command)
     if cmd and cmd[0] == "--":
@@ -548,6 +658,8 @@ def main(argv: list[str] | None = None) -> int:
         lazy=parsed.lazy,
         cache_ttl=parsed.cache_ttl,
         quiet=parsed.quiet,
+        cli_only=parsed.cli_only,
+        bridge_socket=parsed.bridge_socket,
     )
     return asyncio.run(proxy.run_stdio(cmd))
 

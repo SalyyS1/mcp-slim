@@ -574,6 +574,73 @@ class TestMCPProxyAndCLI(unittest.TestCase):
     self.assertEqual(set(schema["properties"].keys()), {"id", "org", "slug"})
     self.assertEqual(schema["required"], ["org"])
 
+  def test_cli_only_and_bridge_multiplexing(self) -> None:
+    import asyncio
+
+    proxy = MCPProxy(cli_only=True)
+    proxy.process_client_message(
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+    )
+    server_tools_resp = proxy.process_server_message(
+        json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": "get_user",
+                        "description": "Fetch user details by username.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"limit": {"type": "integer"}},
+                        },
+                    }
+                ]
+            },
+        })
+    )
+    parsed_host_resp = json.loads(server_tools_resp)
+    self.assertEqual(parsed_host_resp["result"]["tools"], [])
+    self.assertIn("get_user", proxy._cached_tools)
+
+    async def _run_bridge_checks() -> None:
+      sent_lines: list[str] = []
+
+      async def _fake_send(line: str) -> None:
+        sent_lines.append(line)
+        req_msg = json.loads(line)
+        out = proxy.process_server_message(
+            json.dumps({
+                "jsonrpc": "2.0",
+                "id": req_msg["id"],
+                "result": {"content": [{"type": "text", "text": "ok:42"}]},
+            })
+        )
+        self.assertEqual(out, "")
+
+      list_res = await proxy.handle_bridge_request({"action": "list"}, _fake_send)
+      self.assertTrue(list_res["ok"])
+      self.assertEqual(list_res["tools"][0]["name"], "get_user")
+
+      schema_res = await proxy.handle_bridge_request(
+          {"action": "schema", "tool": "get_user"}, _fake_send
+      )
+      self.assertTrue(schema_res["ok"])
+      self.assertEqual(schema_res["tool"]["name"], "get_user")
+
+      call_res = await proxy.handle_bridge_request(
+          {"action": "call", "tool": "get_user", "arguments": {"limit": "42"}},
+          _fake_send,
+      )
+      self.assertTrue(call_res["ok"])
+      self.assertEqual(
+          call_res["response"]["result"]["content"][0]["text"], "ok:42"
+      )
+      forwarded = json.loads(sent_lines[-1])
+      self.assertEqual(forwarded["params"]["arguments"]["limit"], 42)
+
+    asyncio.run(_run_bridge_checks())
+
 
 if __name__ == "__main__":
   unittest.main()

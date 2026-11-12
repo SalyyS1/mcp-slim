@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import time
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from .guard import SecretGuard
 from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
@@ -40,6 +41,8 @@ class MCPProxy:
       lazy: bool = False,
       cache_ttl: float = 0.0,
       quiet: bool = False,
+      cli_only: bool = False,
+      bridge_socket: str | None = None,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -51,10 +54,15 @@ class MCPProxy:
     self.cache_ttl = cache_ttl
     self.stats = SlimStats()
     self.quiet = quiet
+    self.cli_only = cli_only
+    self.bridge_socket = bridge_socket
     self._pending_methods: dict[str | int, str] = {}
     self._pending_cache_keys: dict[str | int, str] = {}
     self._read_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     self._local_responses: list[str] = []
+    self._cached_tools: dict[str, dict[str, Any]] = {}
+    self._bridge_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
+    self._bridge_seq: int = 0
 
   def pop_local_responses(self) -> list[str]:
     """Returns any locally synthesized JSON-RPC responses (e.g. from mcp_search_tools)."""
@@ -207,19 +215,33 @@ class MCPProxy:
       if method == "tools/list" or isinstance(result.get("tools"), list):
         tools = result.get("tools")
         if isinstance(tools, list):
-          if self.lazy_broker is not None:
+          slimmed_list = self.schema_slimmer.slim_tools_list(
+              tools, stats=None if self.lazy_broker is not None else self.stats
+          )
+          for t in slimmed_list:
+            if isinstance(t.get("name"), str):
+              self._cached_tools[t["name"]] = t
+          if self.cli_only:
+            result["tools"] = []
+          elif self.lazy_broker is not None:
             result["tools"] = self.lazy_broker.ingest_tools(
                 tools, stats=self.stats
             )
           else:
-            result["tools"] = self.schema_slimmer.slim_tools_list(
-                tools, stats=self.stats
-            )
+            result["tools"] = slimmed_list
       elif method == "tools/call" or isinstance(result.get("content"), list):
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
       msg["result"] = result
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
       redacted_str = self.secret_guard.redact_text(serialized)
+      if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
+        waiter = self._bridge_waiters.pop(msg_id)
+        if not waiter.done():
+          try:
+            waiter.set_result(json.loads(redacted_str))
+          except json.JSONDecodeError:
+            waiter.set_result(msg)
+        return ""
       if (
           pending_cache_key is not None
           and self.cache_ttl > 0.0
@@ -236,7 +258,80 @@ class MCPProxy:
           pass
       return redacted_str + "\n"
 
+    if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
+      waiter = self._bridge_waiters.pop(msg_id)
+      if not waiter.done():
+        waiter.set_result(msg)
+      return ""
+
     return raw_line
+
+  async def handle_bridge_request(
+      self,
+      req: dict[str, Any],
+      send_upstream: Callable[[str], Awaitable[None]],
+      timeout: float = 30.0,
+  ) -> dict[str, Any]:
+    """Handles a local CLI bridge request ('list', 'schema', or 'call') multiplexed over the live MCP session."""
+    action = req.get("action", "list")
+    loop = asyncio.get_running_loop()
+
+    async def _ensure_tools_cached() -> None:
+      if self._cached_tools:
+        return
+      self._bridge_seq += 1
+      req_id = f"__mcp_slim_bridge_{self._bridge_seq}__"
+      fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+      self._bridge_waiters[req_id] = fut
+      self._pending_methods[req_id] = "tools/list"
+      list_msg = {"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}}
+      await send_upstream(json.dumps(list_msg, separators=(",", ":")) + "\n")
+      await asyncio.wait_for(fut, timeout=timeout)
+
+    if action == "list":
+      await _ensure_tools_cached()
+      items = [
+          {"name": name, "description": t.get("description", "")}
+          for name, t in self._cached_tools.items()
+      ]
+      return {"ok": True, "tools": items}
+
+    if action == "schema":
+      await _ensure_tools_cached()
+      tool_name = str(req.get("tool", ""))
+      tool_def = self._cached_tools.get(tool_name)
+      if tool_def is None:
+        return {"ok": False, "error": f"Unknown tool: {tool_name}"}
+      return {"ok": True, "tool": tool_def}
+
+    if action == "call":
+      tool_name = str(req.get("tool", ""))
+      arguments = req.get("arguments")
+      if not isinstance(arguments, dict):
+        arguments = {}
+      self._bridge_seq += 1
+      req_id = f"__mcp_slim_bridge_{self._bridge_seq}__"
+      fut = loop.create_future()
+      self._bridge_waiters[req_id] = fut
+      call_msg = {
+          "jsonrpc": "2.0",
+          "id": req_id,
+          "method": "tools/call",
+          "params": {"name": tool_name, "arguments": arguments},
+      }
+      processed = self.process_client_message(
+          json.dumps(call_msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+      )
+      local_replies = self.pop_local_responses()
+      if local_replies:
+        self._bridge_waiters.pop(req_id, None)
+        return {"ok": True, "response": json.loads(local_replies[0])}
+      if processed:
+        await send_upstream(processed)
+      resp = await asyncio.wait_for(fut, timeout=timeout)
+      return {"ok": True, "response": resp}
+
+    return {"ok": False, "error": f"Unsupported bridge action: {action}"}
 
   async def run_stdio(self, command: list[str]) -> int:
     """Spawns the upstream MCP server and proxies stdio streams."""
@@ -248,6 +343,45 @@ class MCPProxy:
     )
     assert proc.stdin is not None
     assert proc.stdout is not None
+
+    stdin_lock = asyncio.Lock()
+
+    async def _send_upstream(line_str: str) -> None:
+      assert proc.stdin is not None
+      async with stdin_lock:
+        proc.stdin.write(line_str.encode("utf-8"))
+        await proc.stdin.drain()
+
+    bridge_server = None
+    if self.bridge_socket:
+      try:
+        if os.path.exists(self.bridge_socket):
+          os.unlink(self.bridge_socket)
+      except OSError:
+        pass
+
+      async def _on_bridge_client(
+          c_reader: asyncio.StreamReader, c_writer: asyncio.StreamWriter
+      ) -> None:
+        try:
+          raw = await c_reader.readline()
+          if raw:
+            req_obj = json.loads(raw.decode("utf-8", errors="replace"))
+            res_obj = await self.handle_bridge_request(req_obj, _send_upstream)
+            c_writer.write(
+                (json.dumps(res_obj, ensure_ascii=False) + "\n").encode("utf-8")
+            )
+            await c_writer.drain()
+        except Exception as exc:
+          err_line = json.dumps({"ok": False, "error": str(exc)}) + "\n"
+          c_writer.write(err_line.encode("utf-8"))
+          await c_writer.drain()
+        finally:
+          c_writer.close()
+
+      bridge_server = await asyncio.start_unix_server(
+          _on_bridge_client, path=self.bridge_socket
+      )
 
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader()
@@ -267,8 +401,7 @@ class MCPProxy:
             sys.stdout.write(local_reply)
             sys.stdout.flush()
           if processed:
-            proc.stdin.write(processed.encode("utf-8"))
-            await proc.stdin.drain()
+            await _send_upstream(processed)
       except (BrokenPipeError, ConnectionResetError):
         pass
       finally:
@@ -286,12 +419,23 @@ class MCPProxy:
           processed = self.process_server_message(
               line.decode("utf-8", errors="replace")
           )
-          sys.stdout.write(processed)
-          sys.stdout.flush()
+          if processed:
+            sys.stdout.write(processed)
+            sys.stdout.flush()
       except (BrokenPipeError, ConnectionResetError):
         pass
 
-    await asyncio.gather(forward_client_to_server(), forward_server_to_client())
+    try:
+      await asyncio.gather(forward_client_to_server(), forward_server_to_client())
+    finally:
+      if bridge_server is not None:
+        bridge_server.close()
+        await bridge_server.wait_closed()
+        try:
+          if self.bridge_socket and os.path.exists(self.bridge_socket):
+            os.unlink(self.bridge_socket)
+        except OSError:
+          pass
     rc = await proc.wait()
     if not self.quiet and self.stats.total_tokens_before > 0:
       sys.stderr.write(
