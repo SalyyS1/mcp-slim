@@ -168,6 +168,21 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 ### 4. `SecretGuard` (Bidirectional Credential & Prompt-Injection Shield)
 Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/list` / `tools/call` payloads across 13 categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, env secrets, and hidden MCP tool-poisoning / indirect prompt-injection directives such as `<IMPORTANT>...</IMPORTANT>` or `ignore previous instructions`).
 
+### 5. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
+For coding agents (Claude Code, OpenCode, Aider, Cursor) that prefer invoking MCP tools from Bash and piping results through `jq`, `grep`, or `awk` without paying per-turn `tools/list` schema tokens:
+- `--cli-only` returns an empty `tools: []` array to the host IDE (`0` schema tokens in the model prompt) while caching the compacted `inputSchema` definitions in memory.
+- `--bridge-socket /tmp/mcp.sock` multiplexes `mcp-slim bridge` CLI commands directly over the single live stdio MCP server process:
+
+```bash
+# 1. Start the stdio proxy with a local bridge socket
+mcp-slim run --cli-only --bridge-socket /tmp/mcp-github.sock -- npx -y @modelcontextprotocol/server-github
+
+# 2. From any Bash session or agent skill:
+mcp-slim bridge -s /tmp/mcp-github.sock                                      # 1-line list of tools
+mcp-slim bridge -s /tmp/mcp-github.sock search_repositories --schema         # on-demand JSON Schema
+mcp-slim bridge -s /tmp/mcp-github.sock search_repositories '{"query":"mcp"}' | jq '.items[0]'
+```
+
 ---
 
 ## Testing
