@@ -226,6 +226,26 @@ class UnionContract:
     return f"[Requires one of: {joined}]"
 
 
+_READ_ONLY_PREFIXES = (
+    "get_",
+    "read_",
+    "list_",
+    "search_",
+    "fetch_",
+    "describe_",
+    "inspect_",
+    "find_",
+    "query_",
+)
+
+_ANNOTATION_BOOL_KEYS = (
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+)
+
+
 class SchemaSlimmer:
   """Minifies MCP `tools/list` schemas and inlines `$defs`/`$ref` for cross-LLM compatibility."""
 
@@ -238,6 +258,7 @@ class SchemaSlimmer:
       inline_refs: bool = True,
       canonical_sort: bool = True,
       preserve_root_unions: bool = False,
+      read_only_only: bool = False,
   ) -> None:
     self.max_desc_chars = max_desc_chars
     self.max_param_desc_chars = max_param_desc_chars
@@ -246,8 +267,10 @@ class SchemaSlimmer:
     self.inline_refs = inline_refs
     self.canonical_sort = canonical_sort
     self.preserve_root_unions = preserve_root_unions
+    self.read_only_only = read_only_only
     self._tool_param_types: dict[str, dict[str, str]] = {}
     self._tool_union_contracts: dict[str, UnionContract] = {}
+    self._tool_annotations: dict[str, dict[str, bool]] = {}
     self.policy_warnings: list[str] = []
     self._pending_union_hint: str = ""
     self._pending_union_contract: UnionContract | None = None
@@ -448,10 +471,43 @@ class SchemaSlimmer:
       out["type"] = "object"
     return out
 
-  def is_tool_allowed(self, name: str) -> bool:
+  @staticmethod
+  def extract_annotations(tool: dict[str, Any]) -> dict[str, bool]:
+    """Extracts MCP ToolAnnotations boolean hints from `tool['annotations']` or top-level keys."""
+    hints: dict[str, bool] = {}
+    raw_ann = tool.get("annotations")
+    if isinstance(raw_ann, dict):
+      for k in _ANNOTATION_BOOL_KEYS:
+        if isinstance(raw_ann.get(k), bool):
+          hints[k] = raw_ann[k]
+    for k in _ANNOTATION_BOOL_KEYS:
+      if k not in hints and isinstance(tool.get(k), bool):
+        hints[k] = tool[k]
+    return hints
+
+  def is_read_only_tool(
+      self, name: str, tool: dict[str, Any] | None = None
+  ) -> bool:
+    """Determines whether a tool is read-only using MCP ToolAnnotations first, then prefix fallback."""
+    hints = (
+        self.extract_annotations(tool)
+        if isinstance(tool, dict)
+        else self._tool_annotations.get(name, {})
+    )
+    if hints.get("destructiveHint") is True:
+      return False
+    if "readOnlyHint" in hints:
+      return hints["readOnlyHint"]
+    return name.lower().startswith(_READ_ONLY_PREFIXES)
+
+  def is_tool_allowed(
+      self, name: str, tool: dict[str, Any] | None = None
+  ) -> bool:
     if self.allow_tools is not None and not _matches_any_pattern(name, self.allow_tools):
       return False
     if self.deny_tools and _matches_any_pattern(name, self.deny_tools):
+      return False
+    if self.read_only_only and not self.is_read_only_tool(name, tool=tool):
       return False
     return True
 
@@ -482,7 +538,13 @@ class SchemaSlimmer:
   def slim_tool(
       self, tool: dict[str, Any], stats: SlimStats | None = None
   ) -> dict[str, Any]:
-    slimmed: dict[str, Any] = {"name": tool["name"]}
+    tool_name = str(tool["name"])
+    ann = self.extract_annotations(tool)
+    if ann:
+      self._tool_annotations[tool_name] = ann
+    else:
+      self._tool_annotations.pop(tool_name, None)
+    slimmed: dict[str, Any] = {"name": tool_name}
     desc = tool.get("description")
     if isinstance(desc, str) and desc.strip():
       slimmed["description"] = compact_description(
@@ -675,7 +737,13 @@ class SchemaSlimmer:
     filtered: list[dict[str, Any]] = []
     for tool in tools:
       name = tool.get("name", "")
-      if not self.is_tool_allowed(name):
+      if isinstance(name, str) and name:
+        ann = self.extract_annotations(tool)
+        if ann:
+          self._tool_annotations[name] = ann
+        else:
+          self._tool_annotations.pop(name, None)
+      if not self.is_tool_allowed(name, tool=tool):
         continue
       filtered.append(self.slim_tool(tool, stats=stats))
     if self.canonical_sort:
@@ -721,7 +789,13 @@ class LazyToolBroker:
 
     for tool in raw_tools:
       name = tool.get("name", "")
-      if not name or not self.schema_slimmer.is_tool_allowed(name):
+      if isinstance(name, str) and name:
+        ann = self.schema_slimmer.extract_annotations(tool)
+        if ann:
+          self.schema_slimmer._tool_annotations[name] = ann
+        else:
+          self.schema_slimmer._tool_annotations.pop(name, None)
+      if not name or not self.schema_slimmer.is_tool_allowed(name, tool=tool):
         continue
       slimmed = self.schema_slimmer.slim_tool(tool, stats=stats)
       self._tools_by_name[name] = slimmed
@@ -1026,3 +1100,273 @@ class OutputSlimmer:
       stats.output_tokens_before += before_tokens
       stats.output_tokens_after += after_tokens
     return out
+
+  def slim_resource_result(
+      self, result: dict[str, Any], stats: SlimStats | None = None
+  ) -> dict[str, Any]:
+    """Compacts MCP `resources/read` payloads (`result.contents[*].text`)."""
+    contents = result.get("contents")
+    if not isinstance(contents, list):
+      return result
+    before_tokens = estimate_tokens(result) if stats is not None else 0
+    new_contents: list[Any] = []
+    for item in contents:
+      if isinstance(item, dict) and isinstance(item.get("text"), str):
+        item = {**item, "text": self.slim_text(item["text"])}
+      new_contents.append(item)
+    out = {**result, "contents": new_contents}
+    if stats is not None:
+      stats.output_tokens_before += before_tokens
+      stats.output_tokens_after += estimate_tokens(out)
+    return out
+
+  def slim_prompt_result(
+      self, result: dict[str, Any], stats: SlimStats | None = None
+  ) -> dict[str, Any]:
+    """Compacts MCP `prompts/get` payloads (`result.messages[*].content`)."""
+    messages = result.get("messages")
+    if not isinstance(messages, list):
+      return result
+    before_tokens = estimate_tokens(result) if stats is not None else 0
+    new_messages: list[Any] = []
+    for msg in messages:
+      if not isinstance(msg, dict):
+        new_messages.append(msg)
+        continue
+      content = msg.get("content")
+      if (
+          isinstance(content, dict)
+          and content.get("type") == "text"
+          and isinstance(content.get("text"), str)
+      ):
+        msg = {
+            **msg,
+            "content": {**content, "text": self.slim_text(content["text"])},
+        }
+      elif isinstance(content, list):
+        slimmed_parts: list[Any] = []
+        for part in content:
+          if (
+              isinstance(part, dict)
+              and part.get("type") == "text"
+              and isinstance(part.get("text"), str)
+          ):
+            part = {**part, "text": self.slim_text(part["text"])}
+          slimmed_parts.append(part)
+        msg = {**msg, "content": slimmed_parts}
+      new_messages.append(msg)
+    out = {**result, "messages": new_messages}
+    if stats is not None:
+      stats.output_tokens_before += before_tokens
+      stats.output_tokens_after += estimate_tokens(out)
+    return out
+
+
+AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
+    {
+        "id": "MS001",
+        "name": "ToolPoisoningOrSmuggling",
+        "shortDescription": {
+            "text": "MCP tool schema contains prompt injection directives or invisible Unicode smuggling."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "MS002",
+        "name": "SchemaEmbeddedSecret",
+        "shortDescription": {
+            "text": "MCP tool schema embeds a live credential, token, or secret in description/default/examples."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "MS003",
+        "name": "UninlinedJsonSchemaRef",
+        "shortDescription": {
+            "text": "MCP tool inputSchema uses $defs/$ref pointers rejected by Gemini, Vertex AI, and strict endpoints."
+        },
+        "defaultConfiguration": {"level": "warning"},
+    },
+    {
+        "id": "MS004",
+        "name": "RootSchemaUnion",
+        "shortDescription": {
+            "text": "MCP tool inputSchema uses root anyOf/oneOf object unions rejected by strict function-calling APIs."
+        },
+        "defaultConfiguration": {"level": "note"},
+    },
+)
+
+
+def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
+  """Profiles token footprint, dialect hazards, and tool-poisoning / secret risks across MCP tools."""
+  from .guard import SecretGuard
+
+  guard_full = SecretGuard(enabled=True)
+  sanitized_tools = guard_full.redact_value(tools)
+
+  slimmer = SchemaSlimmer()
+  stats_std = SlimStats()
+  slimmed_tools = slimmer.slim_tools_list(sanitized_tools, stats=stats_std)
+  stats_std.schema_tokens_before = estimate_tokens(tools)
+
+  broker = LazyToolBroker(schema_slimmer=slimmer)
+  stats_lazy = SlimStats()
+  broker.ingest_tools(sanitized_tools, stats=stats_lazy)
+  stats_lazy.schema_tokens_before = stats_std.schema_tokens_before
+
+  slim_by_name = {t.get("name", ""): t for t in slimmed_tools}
+  findings: list[dict[str, Any]] = []
+  per_tool: list[dict[str, Any]] = []
+
+  for idx, raw_t in enumerate(tools):
+    if not isinstance(raw_t, dict):
+      continue
+    name = str(raw_t.get("name", f"tool_{idx}"))
+    slim_t = slim_by_name.get(name, raw_t)
+    raw_tok = estimate_tokens(raw_t)
+    slim_tok = estimate_tokens(slim_t)
+    raw_dump = json.dumps(raw_t, ensure_ascii=False)
+    has_ref = '"$defs"' in raw_dump or '"$ref"' in raw_dump or '"definitions"' in raw_dump
+    in_schema = raw_t.get("inputSchema")
+    has_root_union = isinstance(in_schema, dict) and any(
+        u in in_schema for u in ("anyOf", "oneOf")
+    )
+
+    tool_guard = SecretGuard(enabled=True)
+    tool_guard.redact_value(raw_t)
+    cats = dict(tool_guard.report.by_category)
+    poison_count = cats.get("prompt_injection", 0) + cats.get("unicode_smuggling", 0)
+    secret_cats = {
+        k: v
+        for k, v in cats.items()
+        if k not in ("prompt_injection", "unicode_smuggling") and v > 0
+    }
+
+    if poison_count > 0:
+      findings.append({
+          "rule_id": "MS001",
+          "level": "error",
+          "tool": name,
+          "message": (
+              f"Tool '{name}' contains prompt injection or invisible Unicode "
+              f"smuggling ({poison_count} occurrence(s))."
+          ),
+      })
+    if secret_cats:
+      cats_str = ", ".join(sorted(secret_cats.keys()))
+      findings.append({
+          "rule_id": "MS002",
+          "level": "error",
+          "tool": name,
+          "message": (
+              f"Tool '{name}' embeds credential material in schema metadata ({cats_str})."
+          ),
+      })
+    if has_ref:
+      findings.append({
+          "rule_id": "MS003",
+          "level": "warning",
+          "tool": name,
+          "message": (
+              f"Tool '{name}' uses $defs/$ref pointers that require inlining for "
+              "Gemini/Vertex compatibility."
+          ),
+      })
+    if has_root_union:
+      findings.append({
+          "rule_id": "MS004",
+          "level": "note",
+          "tool": name,
+          "message": (
+              f"Tool '{name}' declares root anyOf/oneOf object unions."
+          ),
+      })
+
+    per_tool.append({
+        "name": name,
+        "raw_tokens": raw_tok,
+        "slim_tokens": slim_tok,
+        "saved_pct": round(((raw_tok - slim_tok) / max(1, raw_tok)) * 100.0, 1),
+        "has_refs": has_ref,
+        "has_root_union": has_root_union,
+        "read_only": slimmer.is_read_only_tool(name, tool=raw_t),
+        "security_categories": cats,
+    })
+
+  std_pct = round(
+      (
+          (stats_std.schema_tokens_before - stats_std.schema_tokens_after)
+          / max(1, stats_std.schema_tokens_before)
+      )
+      * 100.0,
+      1,
+  )
+  lazy_pct = round(
+      (
+          (stats_lazy.schema_tokens_before - stats_lazy.schema_tokens_after)
+          / max(1, stats_lazy.schema_tokens_before)
+      )
+      * 100.0,
+      1,
+  )
+  security_findings = sum(
+      1 for f in findings if f["rule_id"] in ("MS001", "MS002")
+  )
+  return {
+      "tool_count": len(per_tool),
+      "tokens_raw": stats_std.schema_tokens_before,
+      "tokens_slim": stats_std.schema_tokens_after,
+      "standard_reduction_pct": std_pct,
+      "tokens_lazy": stats_lazy.schema_tokens_after,
+      "lazy_reduction_pct": lazy_pct,
+      "refs_inlined": stats_std.refs_inlined,
+      "security_findings": security_findings,
+      "findings": findings,
+      "tools": per_tool,
+  }
+
+
+def build_audit_sarif(
+    report: dict[str, Any],
+    source_uri: str = "tools.json",
+    version: str = "0.8.0",
+) -> dict[str, Any]:
+  """Formats an `audit_tools_manifest` report as OASIS SARIF v2.1.0."""
+  results: list[dict[str, Any]] = []
+  for f in report.get("findings", []):
+    results.append({
+        "ruleId": f["rule_id"],
+        "level": f["level"],
+        "message": {"text": f["message"]},
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {"uri": source_uri},
+                },
+                "logicalLocations": [
+                    {
+                        "name": f["tool"],
+                        "kind": "function",
+                    }
+                ],
+            }
+        ],
+    })
+  return {
+      "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+      "version": "2.1.0",
+      "runs": [
+          {
+              "tool": {
+                  "driver": {
+                      "name": "mcp-slim",
+                      "version": version,
+                      "informationUri": "https://github.com/SalyyS1/mcp-slim",
+                      "rules": list(AUDIT_SARIF_RULES),
+                  }
+              },
+              "results": results,
+          }
+      ],
+  }

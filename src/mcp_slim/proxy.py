@@ -10,25 +10,14 @@ import time
 from typing import Any, Callable, Awaitable
 
 from .guard import SecretGuard
-from .slimmer import LazyToolBroker, OutputSlimmer, SchemaSlimmer, SlimStats
-from .telemetry import StatsLedger
-
-_READ_ONLY_PREFIXES = (
-    "get_",
-    "read_",
-    "list_",
-    "search_",
-    "fetch_",
-    "describe_",
-    "inspect_",
-    "find_",
-    "query_",
+from .slimmer import (
+    LazyToolBroker,
+    OutputSlimmer,
+    SchemaSlimmer,
+    SlimStats,
+    estimate_tokens,
 )
-
-
-def _is_read_only_tool(name: str) -> bool:
-  lower = name.lower()
-  return lower.startswith(_READ_ONLY_PREFIXES)
+from .telemetry import StatsLedger
 
 
 class MCPProxy:
@@ -136,6 +125,12 @@ class MCPProxy:
 
       if isinstance(tool_name, str) and not self.schema_slimmer.is_tool_allowed(tool_name):
         self.stats.blocked_calls += 1
+        reason_suffix = (
+            " (read-only mode active)"
+            if self.schema_slimmer.read_only_only
+            and not self.schema_slimmer.is_read_only_tool(tool_name)
+            else ""
+        )
         blocked_payload = {
             "jsonrpc": msg.get("jsonrpc", "2.0"),
             "id": msg_id,
@@ -145,7 +140,7 @@ class MCPProxy:
                         "type": "text",
                         "text": (
                             f"[mcp-slim] Tool '{tool_name}' is blocked by proxy "
-                            "allow/deny policy."
+                            f"allow/deny policy{reason_suffix}."
                         ),
                     }
                 ],
@@ -183,7 +178,7 @@ class MCPProxy:
           return ""
 
       if self.cache_ttl > 0.0 and isinstance(tool_name, str):
-        if _is_read_only_tool(tool_name):
+        if self.schema_slimmer.is_read_only_tool(tool_name):
           canonical_args = json.dumps(
               arguments if isinstance(arguments, dict) else {},
               sort_keys=True,
@@ -247,8 +242,11 @@ class MCPProxy:
 
     if isinstance(result, dict):
       if method == "tools/list" or isinstance(result.get("tools"), list):
-        tools = result.get("tools")
-        if isinstance(tools, list):
+        raw_tools = result.get("tools")
+        if isinstance(raw_tools, list):
+          orig_tok = estimate_tokens(raw_tools)
+          tools = self.secret_guard.redact_value(raw_tools)
+          sanitized_tok = estimate_tokens(tools)
           slimmed_list = self.schema_slimmer.slim_tools_list(
               tools, stats=None if self.lazy_broker is not None else self.stats
           )
@@ -266,8 +264,13 @@ class MCPProxy:
             )
           else:
             result["tools"] = slimmed_list
+          self.stats.schema_tokens_before += orig_tok - sanitized_tok
       elif method == "tools/call" or isinstance(result.get("content"), list):
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
+      elif method == "resources/read" or isinstance(result.get("contents"), list):
+        result = self.output_slimmer.slim_resource_result(result, stats=self.stats)
+      elif method == "prompts/get" or isinstance(result.get("messages"), list):
+        result = self.output_slimmer.slim_prompt_result(result, stats=self.stats)
       result = self.secret_guard.redact_value(result)
       msg["result"] = result
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))

@@ -89,7 +89,7 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
     (
         "url_userinfo_secret",
         ("://",),
-        re.compile(r"(://[^/\s:@\"']+:)([^/\s\"']+)(@)"),
+        re.compile(r"(://[^/\s:@\"']+:(?!\[(?:REDACTED|SECRET_REF):))([^/\s\"']+)(@)"),
         r"\1[REDACTED:URL_SECRET]\3",
     ),
     (
@@ -117,7 +117,7 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
             "x-amz-signature=",
         ),
         re.compile(
-            r"(?i)([?&](?:token|private_token|oauth_token|access_token|auth_token|api_key|apikey|sig|signature|x-amz-signature|x-amz-security-token)=)([^&\s\"'#]{6,})"
+            r"(?i)([?&](?:token|private_token|oauth_token|access_token|auth_token|api_key|apikey|sig|signature|x-amz-signature|x-amz-security-token)=(?!\[(?:REDACTED|SECRET_REF):))([^&\s\"'#]{6,})"
         ),
         r"\1[REDACTED:URL_QUERY_SECRET]",
     ),
@@ -142,17 +142,19 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
             "database_password",
         ),
         re.compile(
-            r"(?i)((?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?)([^\s'\",;}{]{8,})(['\"]?)"
+            r"(?i)((?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?(?!\[(?:REDACTED|SECRET_REF):))([^\s'\",;}{]{8,})(['\"]?)"
         ),
         r"\1[REDACTED:ENV_SECRET]\3",
     ),
     (
         "prompt_injection",
         (
-            "<IMPORTANT>",
-            "<important>",
-            "<SYSTEM>",
-            "<system>",
+            "<IMPORTANT",
+            "<important",
+            "<SYSTEM",
+            "<system",
+            "<INSTRUCTION",
+            "<instruction",
             "ignore previous instructions",
             "Ignore previous instructions",
             "ignore all previous instructions",
@@ -161,10 +163,14 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
             "Disregard previous instructions",
         ),
         re.compile(
-            r"(?is)(?:<(?:IMPORTANT|SYSTEM|INSTRUCTION)>[\s\S]*?</(?:IMPORTANT|SYSTEM|INSTRUCTION)>|(?:ignore|disregard)\s+(?:all\s+)?(?:previous|prior)\s+instructions[^\n.\"]*)"
+            r"(?is)(?:<(?:IMPORTANT|SYSTEM|INSTRUCTION)\b[^>]*>[\s\S]*?</(?:IMPORTANT|SYSTEM|INSTRUCTION)>|<(?:IMPORTANT|SYSTEM|INSTRUCTION)\b[^>]*>[\s\S]*$|(?:ignore|disregard)\s+(?:all\s+)?(?:previous|prior)\s+instructions[^\n.\"]*)"
         ),
         "[REDACTED:PROMPT_INJECTION]",
     ),
+)
+
+_UNICODE_SMUGGLING_RE = re.compile(
+    r"[\u202a-\u202e\u2066-\u2069\U000e0000-\U000e007f]+"
 )
 
 _FRAMED_SECRET_CATEGORIES = frozenset({
@@ -213,6 +219,10 @@ class SecretGuard:
     if not self.enabled or not text:
       return text
     current = text
+    if not current.isascii():
+      current, smug_count = _UNICODE_SMUGGLING_RE.subn("", current)
+      if smug_count:
+        self.report.record("unicode_smuggling", smug_count)
     for name, triggers, pattern, replacement in _SECRET_RULES:
       if not any(t in current for t in triggers):
         continue

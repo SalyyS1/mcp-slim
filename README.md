@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v0.7.0](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v0.7.0)
+[![Version: v0.8.0](https://img.shields.io/badge/version-v0.8.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v0.8.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.7.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.8.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -52,13 +52,13 @@ flowchart LR
 | **On-Demand Lazy Meta-Tool Discovery (`--lazy`)** | No | No | Yes | Client-locked | **Yes (-98.7% tokens, works on any client)** |
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
 | **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
-| **Wildcard Glob Tool Filtering (`get_*,search_*`)** | No | Exact names | No | No | **Yes (`--allow-tools` / `--deny-tools`)** |
-| **`$defs`/`$ref` Inlining & Gemini/Vertex Dialect Normalization** | No | No | No | No | **Yes (Inlines `$ref`, flattens `anyOf`/`["T","null"]`, strips `discriminator`)** |
-| **`tools/call` Valid-JSON, NDJSON & Head+Tail Log Compaction** | No | No | No | No | **Yes (-43%+ output tokens, preserves stack-trace head & tail)** |
-| **Read-Only Tool Call TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (Auto-invalidated on mutations)** |
-| **Secret Redaction & Tool-Poisoning / Prompt-Injection Shield** | No | No | No | No | **Yes (13 categories, `141 µs` p50)** |
+| **Wildcard Glob & `--read-only` Policy (`ToolAnnotations`)** | No | Exact names | No | No | **Yes (`--allow-tools`, `--deny-tools`, `--read-only`)** |
+| **`$defs`/`$ref` Inlining & Gemini/Vertex Dialect Normalization** | No | No | No | No | **Yes (Inlines `$ref`, flattens `anyOf`/`["T","null"]`, union guards)** |
+| **`tools/call`, `resources/read` & `prompts/get` Compaction** | No | No | No | No | **Yes (-43%+ output tokens, preserves stack-trace head & tail)** |
+| **Semantic Read-Only TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (`readOnlyHint`/`destructiveHint` aware)** |
+| **Pre-Truncation Tool-Poisoning, Unicode Smuggling & Secret Shield** | No | No | No | No | **Yes (15 rules + BiDi/Tag stripping + `--vault-handles`)** |
 | **Persistent Token & API Cost Telemetry (`mcp-slim stats`)** | No | No | No | No | **Yes (Per-server ledger + model USD savings)** |
-| **Live Stdio Inspector & CI GitHub Action (`audit`)** | No | No | No | No | **Yes (`mcp-slim inspect` & `SalyyS1/mcp-slim@main`)** |
+| **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`audit --sarif --fail-on-security` & `SalyyS1/mcp-slim@main`)** |
 
 ---
 
@@ -124,8 +124,9 @@ Wrap all servers in a Claude Desktop, Claude Code, Cursor, or Windsurf configura
 # Standard schema slimming (-48.8% tokens):
 mcp-slim wrap -i ~/.cursor/mcp.json
 
-# Or enable On-Demand Lazy Discovery (-98.7% static schema tokens):
+# Or enable On-Demand Lazy Discovery (-98.7% static schema tokens) and strict read-only policy:
 mcp-slim wrap --lazy -i ~/.cursor/mcp.json
+mcp-slim wrap --read-only -i ~/.cursor/mcp.json
 
 # Zero-install config wrapping using uvx or npx runners directly inside mcp.json:
 uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim wrap --runner uvx -i ~/.cursor/mcp.json
@@ -205,23 +206,32 @@ mcp-server-git                 |        1 |    12,218 |     6,096 |   -50.1% |  
 ==============================================================================
 ```
 
-### 5. CI Schema & Token Audit GitHub Action (`uses: SalyyS1/mcp-slim@main`)
+### 5. CI Schema & Security SARIF Audit GitHub Action (`uses: SalyyS1/mcp-slim@main`)
 
-Catch MCP context bloat and Gemini/Vertex AI `$defs`/`$ref` incompatibilities automatically on pull requests and publish the audit table directly to `$GITHUB_STEP_SUMMARY`:
+Catch MCP context bloat, Gemini/Vertex AI `$defs`/`$ref` incompatibilities (`MS003`), embedded schema secrets (`MS002`), and tool-poisoning / Unicode smuggling payloads (`MS001`) automatically on pull requests, publishing both `$GITHUB_STEP_SUMMARY` tables and OASIS SARIF v2.1.0 reports for GitHub Code Scanning:
 
 ```yaml
-name: MCP Schema Audit
+name: MCP Schema & Security Audit
 on: [push, pull_request]
 
 jobs:
   mcp-audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
-      - name: Audit MCP Tool Schemas & Token Footprint
+      - name: Audit MCP Tool Schemas & Security
         uses: SalyyS1/mcp-slim@main
         with:
           manifest: benchmarks/fixtures/real_mcp_workload.json
+          sarif-file: mcp-slim.sarif
+          fail-on-security: "true"
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: mcp-slim.sarif
 ```
 
 ---
@@ -245,14 +255,15 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 - Answers `mcp_search_tools(query, limit)` locally inside the proxy in `<0.1 ms` using BM25 ranking over tool names, descriptions, and parameter keys.
 - Rewrites `mcp_call_tool(tool_name, arguments)` directly into native upstream `tools/call` JSON-RPC requests.
 
-### 3. `OutputSlimmer`, Type Coercer & Read-Only TTL Cache (`tools/call`)
+### 3. `OutputSlimmer`, Type Coercer & `ToolAnnotations` Policy (`tools/call`, `resources/read`, `prompts/get`)
 - **Schema-Guided Argument Type Coercion:** Automatically coerces stringified integers (`"50"` -> `50`), floats, booleans (`"true"` -> `True`), and JSON arrays/objects in outgoing `tools/call` requests using the cached `inputSchema` from `tools/list`, preventing `-32602 ValidationError` failures on strict FastMCP/Pydantic servers when using local or quantized LLMs.
-- **Structure-Aware JSON Compaction, Markdown Table Slimming & Hypermedia Pruning:** Parses JSON strings inside `content[].text`, recursively removes `null`, `""`, `[]`, `{}` values and noisy REST hypermedia keys (`followers_url`, `gists_url`, `node_id`, etc.), compacts padded ASCII/Markdown tables, and trims oversized object arrays on element boundaries so truncated payloads remain **100% valid, parseable JSON**.
-- **Deterministic Read-Only TTL Cache (`--cache-ttl <seconds>`):** Caches idempotent read calls (`get_*`, `read_*`, `list_*`, `search_*`, `fetch_*`) keyed by canonical arguments and automatically invalidates the cache when any mutating tool is invoked.
-- **UTF-16 Surrogate & ANSI Sanitization:** Strips terminal escape sequences and replaces lone UTF-16 surrogates (`\ud800`–`\udfff`) so malformed tool outputs never crash stdio streams.
+- **Full-Protocol Payload Compaction (`tools/call`, `resources/read`, `prompts/get`):** Compacts JSON strings, NDJSON streams, ANSI escape sequences, and padded Markdown tables across `tools/call` (`content[]`), `resources/read` (`contents[]`), and `prompts/get` (`messages[]`), pruning noisy REST hypermedia keys (`followers_url`, `gists_url`, `node_id`, etc.) while keeping truncated payloads **100% valid, parseable JSON**.
+- **`ToolAnnotations`-Aware Semantic Cache & `--read-only` Mode:** Honors MCP `annotations.readOnlyHint` and `annotations.destructiveHint` (falling back to prefix heuristics when omitted) for `--cache-ttl <seconds>` read-cache routing and `--read-only` enforcement (`mcp-slim run --read-only` / `mcp-slim wrap --read-only`), preventing misleadingly named `get_*` mutators from being cached or executed.
+- **UTF-16 Surrogate & ANSI Sanitization:** Strips terminal escape sequences and replaces lone UTF-16 surrogates (`\ud800`..`\udfff`) so malformed tool outputs never crash stdio streams.
 
-### 4. `SecretGuard` & Session-Scoped Vault Handles (`--vault-handles`)
-Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing structured `tools/call` arguments and incoming `tools/list` / `tools/call` payloads across 15 rules (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, query tokens, env secrets, and hidden MCP prompt-injection directives).
+### 4. Pre-Truncation `SecretGuard`, Unicode Smuggling Firewall & Vault Handles
+Scans `tools/list` schemas *before* description truncation as well as outgoing `tools/call` arguments and incoming `tools/call`, `resources/read`, and `prompts/get` payloads across 15 credential and injection rules (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, idempotent URI/query/env framed secrets, and `<IMPORTANT>`/`<SYSTEM>`/`<INSTRUCTION>` tool-poisoning directives).
+- **Unicode Tag & BiDi Smuggling Neutralization:** Strips invisible Unicode Tag characters (`U+E0000..U+E007F`) and bidirectional override/isolate controls (`U+202A..U+202E`, `U+2066..U+2069`) prior to injection matching so split tags (`<IMP\U000e0041ORTANT>`) or padded suffixes cannot evade truncation or regex triggers.
 - **Session-Scoped Opaque Handles (`--vault-handles`):** Tokenizes intercepted secrets in server outputs into HMAC-keyed session handles (`[SECRET_REF:github_token:...]`) stored only in proxy memory so raw credentials never enter the LLM context window, while recursively resolving handles back to raw values across nested `tools/call` arguments on outbound calls.
 
 ### 5. Standalone MCP Server Mode (`mcp-slim serve`)
@@ -286,7 +297,7 @@ python3 benchmarks/run_benchmarks.py
 
 ## Related AI Infrastructure Projects by [@SalyyS1](https://github.com/SalyyS1)
 
-- **[loraspectra](https://github.com/SalyyS1/loraspectra)** — Zero-dependency Rust engine & CLI for auditing spectral rank collapse, dynamically compressing `.safetensors` LoRA adapters by **-83.8%** at **99% Frobenius energy**, and merging conflicting adapters via QR-Core Orthogonal Subspace Projection (`1,050x–2,680x` faster than dense SVD).
+- **[loraspectra](https://github.com/SalyyS1/loraspectra)** - Zero-dependency Rust engine & CLI for auditing spectral rank collapse, dynamically compressing `.safetensors` LoRA adapters by **-83.8%** at **99% Frobenius energy**, and merging conflicting adapters via QR-Core Orthogonal Subspace Projection (`1,050x-2,680x` faster than dense SVD).
 
 ---
 

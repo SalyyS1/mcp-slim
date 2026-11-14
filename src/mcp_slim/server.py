@@ -9,7 +9,11 @@ from typing import Any
 
 from . import __version__
 from .guard import SecretGuard
-from .slimmer import LazyToolBroker, SchemaSlimmer, SlimStats, estimate_tokens
+from .slimmer import (
+    SchemaSlimmer,
+    SlimStats,
+    audit_tools_manifest,
+)
 from .telemetry import StatsLedger
 
 SERVER_TOOLS: list[dict[str, Any]] = [
@@ -180,42 +184,10 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
             "id": msg_id,
             "result": _text_result("Parameter 'tools' must be a JSON array.", is_error=True),
         }
-      slimmer = SchemaSlimmer()
-      std_stats = SlimStats()
-      compacted = slimmer.slim_tools_list(tools, stats=std_stats)
-      broker = LazyToolBroker(schema_slimmer=slimmer)
-      lazy_stats = SlimStats()
-      broker.ingest_tools(tools, stats=lazy_stats)
-      per_tool = []
-      slim_map = {t.get("name", ""): t for t in compacted}
-      for raw_t in tools:
-        if not isinstance(raw_t, dict):
-          continue
-        t_name = str(raw_t.get("name", ""))
-        raw_tok = estimate_tokens(raw_t)
-        slim_tok = estimate_tokens(slim_map.get(t_name, raw_t))
-        raw_dump = json.dumps(raw_t)
-        per_tool.append({
-            "name": t_name,
-            "raw_tokens": raw_tok,
-            "slim_tokens": slim_tok,
-            "has_refs": "$defs" in raw_dump or "$ref" in raw_dump,
-            "has_root_union": isinstance(raw_t.get("inputSchema"), dict)
-            and any(u in raw_t["inputSchema"] for u in ("anyOf", "oneOf")),
-        })
       return {
           "jsonrpc": "2.0",
           "id": msg_id,
-          "result": _text_result({
-              "tool_count": len(tools),
-              "tokens_raw": std_stats.schema_tokens_before,
-              "tokens_slim": std_stats.schema_tokens_after,
-              "standard_reduction_pct": std_stats.reduction_pct,
-              "tokens_lazy": lazy_stats.schema_tokens_after,
-              "lazy_reduction_pct": lazy_stats.reduction_pct,
-              "refs_inlined": std_stats.refs_inlined,
-              "tools": per_tool,
-          }),
+          "result": _text_result(audit_tools_manifest(tools)),
       }
 
     if name == "redact_secrets":

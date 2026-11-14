@@ -18,6 +18,8 @@ from .slimmer import (
     OutputSlimmer,
     SchemaSlimmer,
     SlimStats,
+    audit_tools_manifest,
+    build_audit_sarif,
     estimate_tokens,
 )
 from .telemetry import StatsLedger
@@ -278,7 +280,12 @@ def _print_tools_audit(tools: list[dict[str, Any]], label: str = "") -> int:
   return 0
 
 
-def run_audit(path: Path | None = None) -> int:
+def run_audit(
+    path: Path | None = None,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+    fail_on_security: bool = False,
+) -> int:
   if path is not None:
     raw_data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(raw_data, list):
@@ -297,7 +304,36 @@ def run_audit(path: Path | None = None) -> int:
       return 1
   else:
     tools = SAMPLE_BENCHMARK_TOOLS
-  return _print_tools_audit(tools)
+
+  report = audit_tools_manifest(tools)
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri=str(path) if path is not None else "sample_tools.json",
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+  else:
+    _print_tools_audit(tools)
+    if report["security_findings"] > 0:
+      print(
+          f"Security findings detected: {report['security_findings']} "
+          "(prompt injection / Unicode smuggling / embedded secrets)"
+      )
+      for f in report["findings"]:
+        if f["rule_id"] in ("MS001", "MS002"):
+          print(f"  [{f['rule_id']}] {f['message']}")
+
+  if fail_on_security and report["security_findings"] > 0:
+    return 2
+  return 0
 
 
 async def _inspect_stdio_server(command: list[str], timeout: float = 15.0) -> list[dict[str, Any]]:
@@ -451,6 +487,7 @@ def wrap_config(
     in_place: bool = False,
     lazy: bool = False,
     runner: str = "mcp-slim",
+    read_only: bool = False,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -471,7 +508,12 @@ def wrap_config(
         or any("SalyyS1/mcp-slim" in a or a == "mcp-slim" for a in arg_strs)
     ):
       continue
-    prefix = ["run", "--lazy", "--"] if lazy else ["run", "--"]
+    prefix: list[str] = ["run"]
+    if lazy:
+      prefix.append("--lazy")
+    if read_only:
+      prefix.append("--read-only")
+    prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
       spec["args"] = ["-y", "github:SalyyS1/mcp-slim", *prefix, cmd, *arg_strs]
@@ -546,6 +588,11 @@ def main(argv: list[str] | None = None) -> int:
       type=str,
       default=None,
       help="Comma-separated denylist of tool names or globs (e.g. 'delete_*')",
+  )
+  run_p.add_argument(
+      "--read-only",
+      action="store_true",
+      help="Restrict exposure and execution to read-only tools using MCP ToolAnnotations (readOnlyHint/destructiveHint) and prefix heuristics",
   )
   run_p.add_argument(
       "--lazy",
@@ -649,6 +696,11 @@ def main(argv: list[str] | None = None) -> int:
       help="Wrap servers with --lazy on-demand discovery mode",
   )
   wrap_p.add_argument(
+      "--read-only",
+      action="store_true",
+      help="Wrap servers with --read-only tool policy enforcement",
+  )
+  wrap_p.add_argument(
       "--runner",
       choices=("mcp-slim", "uvx", "npx"),
       default="mcp-slim",
@@ -657,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
 
   audit_p = sub.add_parser(
       "audit",
-      help="Audit token footprint and $defs/$ref compatibility of a tools JSON file",
+      help="Audit token footprint, $defs/$ref compatibility, and tool poisoning of a tools JSON file",
   )
   audit_p.add_argument(
       "file",
@@ -665,6 +717,23 @@ def main(argv: list[str] | None = None) -> int:
       nargs="?",
       default=None,
       help="Optional path to tools JSON or benchmark fixture",
+  )
+  audit_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON audit report",
+  )
+  audit_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
+  )
+  audit_p.add_argument(
+      "--fail-on-security",
+      action="store_true",
+      help="Exit with code 2 when MS001/MS002 tool-poisoning or embedded-secret findings are detected",
   )
 
   inspect_p = sub.add_parser(
@@ -721,7 +790,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
   if parsed.subcommand == "audit":
-    return run_audit(parsed.file)
+    return run_audit(
+        parsed.file,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+        fail_on_security=parsed.fail_on_security,
+    )
 
   if parsed.subcommand == "inspect":
     cmd = list(parsed.command)
@@ -737,6 +811,7 @@ def main(argv: list[str] | None = None) -> int:
         in_place=parsed.in_place,
         lazy=parsed.lazy,
         runner=parsed.runner,
+        read_only=parsed.read_only,
     )
 
   if parsed.subcommand == "bridge":
@@ -770,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_tools=allow_set,
             deny_tools=deny_set,
             preserve_root_unions=parsed.preserve_root_unions,
+            read_only_only=parsed.read_only,
         ),
         output_slimmer=OutputSlimmer(),
         secret_guard=SecretGuard(
