@@ -12,6 +12,7 @@ from typing import Any
 from . import __version__
 from .guard import SecretGuard
 from .proxy import MCPProxy
+from .server import run_serve
 from .slimmer import (
     LazyToolBroker,
     OutputSlimmer,
@@ -563,6 +564,16 @@ def main(argv: list[str] | None = None) -> int:
       help="Disable bidirectional secret redaction",
   )
   run_p.add_argument(
+      "--vault-handles",
+      action="store_true",
+      help="Tokenize intercepted secrets into session-scoped [SECRET_REF:...] handles and resolve them on outbound tool calls",
+  )
+  run_p.add_argument(
+      "--preserve-root-unions",
+      action="store_true",
+      help="Keep root anyOf/oneOf JSON Schemas unflattened instead of adapting them for strict LLM providers",
+  )
+  run_p.add_argument(
       "--no-stats",
       action="store_true",
       help="Disable persistent token & cost telemetry for this session (or set MCP_SLIM_NO_STATS=1)",
@@ -688,12 +699,19 @@ def main(argv: list[str] | None = None) -> int:
       help="Path to stats JSON file (overrides MCP_SLIM_STATS_PATH)",
   )
 
+  sub.add_parser(
+      "serve",
+      help="Run mcp-slim as a standalone MCP stdio server exposing schema compaction & SecretGuard tools",
+  )
   sub.add_parser("benchmark", help="Run built-in token compression & security benchmark")
 
   parsed = parser.parse_args(args_list)
 
   if parsed.benchmark or parsed.subcommand == "benchmark":
     return run_benchmark()
+
+  if parsed.subcommand == "serve":
+    return run_serve()
 
   if parsed.subcommand == "stats":
     return run_stats(
@@ -751,9 +769,13 @@ def main(argv: list[str] | None = None) -> int:
             max_param_desc_chars=parsed.max_param_desc,
             allow_tools=allow_set,
             deny_tools=deny_set,
+            preserve_root_unions=parsed.preserve_root_unions,
         ),
         output_slimmer=OutputSlimmer(),
-        secret_guard=SecretGuard(enabled=not parsed.no_secret_guard),
+        secret_guard=SecretGuard(
+            enabled=not parsed.no_secret_guard,
+            vault_handles=parsed.vault_handles,
+        ),
         lazy=parsed.lazy,
         cache_ttl=parsed.cache_ttl,
         quiet=parsed.quiet,

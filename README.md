@@ -4,14 +4,15 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v0.6.0](https://img.shields.io/badge/version-v0.6.0-blue)](https://github.com/SalyyS1/mcp-slim)
+[![Version: v0.7.0](https://img.shields.io/badge/version-v0.7.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v0.7.0)
+[![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
 [![Dependencies: 0](https://img.shields.io/badge/dependencies-0-2ea043)](https://github.com/SalyyS1/mcp-slim/blob/main/pyproject.toml)
 [![Protocol: MCP JSON-RPC 2.0](https://img.shields.io/badge/MCP-JSON--RPC%202.0-1f6feb)](https://modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-gray.svg)](https://github.com/SalyyS1/mcp-slim/blob/main/LICENSE)
 
-> **Try Instantly in Your Browser (Zero Install, 100% Client-Side):** [**Interactive MCP Token & Security Playground (`https://salyys1.github.io/mcp-slim/`) &rarr;**](https://salyys1.github.io/mcp-slim/) — paste any `tools/list`, `tools/call`, or `mcp.json` config to preview token savings, `$defs/$ref` inlining, secret redaction, and monthly API USD savings live.
+> **Try Instantly in Your Browser (Zero Install, 100% Client-Side):** [**Interactive MCP Token & Security Playground (`https://salyys1.github.io/mcp-slim/`)**](https://salyys1.github.io/mcp-slim/): paste any `tools/list`, `tools/call`, or `mcp.json` config to preview token savings, `$defs/$ref` inlining, secret redaction, and monthly API USD savings live.
 
 ![mcp-slim Live Audit & Stdio Proxy Demo](assets/terminal-demo.svg)
 
@@ -43,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.6.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.7.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -230,10 +231,10 @@ jobs:
 ### 1. `SchemaSlimmer` (`tools/list`)
 - **Recursive `$defs` / `$ref` Inlining:** Resolves local `#/$defs/...` and `#/definitions/...` JSON pointers inline and removes `$defs` blocks so Pydantic/FastMCP servers work without `400 Invalid Argument` errors on Google Gemini, Vertex AI, and Azure OpenAI.
 - **Metadata Stripping:** Removes `$schema`, `$id`, `title`, `additionalProperties`, `examples`, and `default` fields that do not affect LLM tool invocation accuracy.
-- **Nullable Union Normalization:** Rewrites `{"anyOf": [{"type": "string"}, {"type": "null"}]}` into `{"type": "string"}` while preserving top-level `required` arrays.
+- **Nullable & Root-Union Normalization with Pre-Flight Branch Validation:** Rewrites `{"anyOf": [{"type": "string"}, {"type": "null"}]}` into `{"type": "string"}`, flattens root object `anyOf`/`oneOf` unions for strict providers while preserving compact disjunction hints (`[Requires one of: id | slug]`), and validates `tools/call` arguments against original `anyOf`/`oneOf` branch contracts at the proxy boundary (`--preserve-root-unions` keeps raw unions intact).
 - **Redundant Description Pruning:** Drops parameter descriptions that merely restate the parameter identifier (`repo_path`: `"The path to the Git repository."`).
 - **Sentence-Boundary Condensation:** Truncates multi-sentence descriptions to their primary clause (`--max-desc` and `--max-param-desc`).
-- **Wildcard Glob Allowlisting and Denylisting:** Filter exposed tools at the proxy boundary via exact names or globs (`--allow-tools` / `--deny-tools`):
+- **Wildcard Glob Filtering with Fuzzy Typo Diagnostics:** Filter exposed tools via exact names or globs (`--allow-tools` / `--deny-tools`), with automatic Levenshtein suggestions when a policy entry matches zero upstream tools:
 
 ```bash
 mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- npx -y @modelcontextprotocol/server-github
@@ -250,10 +251,14 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 - **Deterministic Read-Only TTL Cache (`--cache-ttl <seconds>`):** Caches idempotent read calls (`get_*`, `read_*`, `list_*`, `search_*`, `fetch_*`) keyed by canonical arguments and automatically invalidates the cache when any mutating tool is invoked.
 - **UTF-16 Surrogate & ANSI Sanitization:** Strips terminal escape sequences and replaces lone UTF-16 surrogates (`\ud800`–`\udfff`) so malformed tool outputs never crash stdio streams.
 
-### 4. `SecretGuard` (Bidirectional Credential & Prompt-Injection Shield)
-Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing `tools/call` arguments and incoming `tools/list` / `tools/call` payloads across 13 categories (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, env secrets, and hidden MCP tool-poisoning / indirect prompt-injection directives such as `<IMPORTANT>...</IMPORTANT>` or `ignore previous instructions`).
+### 4. `SecretGuard` & Session-Scoped Vault Handles (`--vault-handles`)
+Uses C-level substring trigger pre-filters paired with literal-prefix anchored regular expressions to scan both outgoing structured `tools/call` arguments and incoming `tools/list` / `tools/call` payloads across 15 rules (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, URI passwords, query tokens, env secrets, and hidden MCP prompt-injection directives).
+- **Session-Scoped Opaque Handles (`--vault-handles`):** Tokenizes intercepted secrets in server outputs into HMAC-keyed session handles (`[SECRET_REF:github_token:...]`) stored only in proxy memory so raw credentials never enter the LLM context window, while recursively resolving handles back to raw values across nested `tools/call` arguments on outbound calls.
 
-### 5. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
+### 5. Standalone MCP Server Mode (`mcp-slim serve`)
+In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
+
+### 6. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
 For coding agents (Claude Code, OpenCode, Aider, Cursor) that prefer invoking MCP tools from Bash and piping results through `jq`, `grep`, or `awk` without paying per-turn `tools/list` schema tokens:
 - `--cli-only` returns an empty `tools: []` array to the host IDE (`0` schema tokens in the model prompt) while caching the compacted `inputSchema` definitions in memory.
 - `--bridge-socket /tmp/mcp.sock` multiplexes `mcp-slim bridge` CLI commands directly over the single live stdio MCP server process:

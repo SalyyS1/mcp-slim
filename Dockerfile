@@ -8,4 +8,4 @@ COPY src/ ./src/
 RUN pip install --no-cache-dir .
 
 ENTRYPOINT ["mcp-slim"]
-CMD ["--help"]
+CMD ["serve"]

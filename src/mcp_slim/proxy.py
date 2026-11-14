@@ -163,6 +163,24 @@ class MCPProxy:
             tool_name, arguments, stats=self.stats
         )
         params["arguments"] = arguments
+        union_err = self.schema_slimmer.validate_union_arguments(
+            tool_name, arguments
+        )
+        if union_err is not None:
+          self.stats.blocked_calls += 1
+          invalid_payload = {
+              "jsonrpc": msg.get("jsonrpc", "2.0"),
+              "id": msg_id,
+              "result": {
+                  "content": [{"type": "text", "text": union_err}],
+                  "isError": True,
+              },
+          }
+          self._local_responses.append(
+              json.dumps(invalid_payload, ensure_ascii=False, separators=(",", ":"))
+              + "\n"
+          )
+          return ""
 
       if self.cache_ttl > 0.0 and isinstance(tool_name, str):
         if _is_read_only_tool(tool_name):
@@ -195,8 +213,15 @@ class MCPProxy:
       self._pending_methods[msg_id] = method
 
     if method == "tools/call" and isinstance(params, dict):
+      if "arguments" in params:
+        redacted_args = self.secret_guard.redact_value(params["arguments"])
+        params["arguments"] = self.secret_guard.resolve_handles_in_value(
+            redacted_args
+        )
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
-      return self.secret_guard.redact_text(serialized) + "\n"
+      if not self.secret_guard.vault_handles:
+        serialized = self.secret_guard.redact_text(serialized)
+      return serialized + "\n"
 
     return raw_line
 
@@ -227,6 +252,9 @@ class MCPProxy:
           slimmed_list = self.schema_slimmer.slim_tools_list(
               tools, stats=None if self.lazy_broker is not None else self.stats
           )
+          if not self.quiet and self.schema_slimmer.policy_warnings:
+            for warn_msg in self.schema_slimmer.policy_warnings:
+              sys.stderr.write(f"[mcp-slim] Warning: {warn_msg}\n")
           for t in slimmed_list:
             if isinstance(t.get("name"), str):
               self._cached_tools[t["name"]] = t
@@ -240,9 +268,14 @@ class MCPProxy:
             result["tools"] = slimmed_list
       elif method == "tools/call" or isinstance(result.get("content"), list):
         result = self.output_slimmer.slim_call_result(result, stats=self.stats)
+      result = self.secret_guard.redact_value(result)
       msg["result"] = result
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
-      redacted_str = self.secret_guard.redact_text(serialized)
+      redacted_str = (
+          serialized
+          if self.secret_guard.vault_handles
+          else self.secret_guard.redact_text(serialized)
+      )
       if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
         waiter = self._bridge_waiters.pop(msg_id)
         if not waiter.done():

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import difflib
 import fnmatch
 import json
 import math
@@ -183,6 +184,48 @@ class SlimStats:
     return round((self.tokens_saved / self.total_tokens_before) * 100.0, 1)
 
 
+@dataclass(frozen=True)
+class BranchContract:
+  """Original object branch requirements captured before root-union flattening."""
+
+  required: tuple[str, ...]
+  allowed_props: frozenset[str]
+  forbid_extra: bool = False
+
+
+@dataclass(frozen=True)
+class UnionContract:
+  """Semantic branch contract preserved when flattening root `anyOf` or `oneOf` schemas."""
+
+  kind: str  # "anyOf" or "oneOf"
+  branches: tuple[BranchContract, ...]
+
+  def describe_branches(self) -> str:
+    parts: list[str] = []
+    for b in self.branches:
+      if b.required:
+        parts.append("{" + ", ".join(b.required) + "}")
+      elif b.allowed_props:
+        parts.append("{" + ", ".join(sorted(b.allowed_props)) + "}")
+    return " | ".join(parts) if parts else self.kind
+
+  def compact_hint(self, common_required: set[str]) -> str:
+    labels: list[str] = []
+    for b in self.branches:
+      residual = [r for r in b.required if r not in common_required]
+      if not residual:
+        return ""
+      label = "+".join(residual)
+      if label not in labels:
+        labels.append(label)
+    if len(labels) < 2:
+      return ""
+    joined = " | ".join(labels)
+    if self.kind == "oneOf":
+      return f"[Requires one of (exclusive): {joined}]"
+    return f"[Requires one of: {joined}]"
+
+
 class SchemaSlimmer:
   """Minifies MCP `tools/list` schemas and inlines `$defs`/`$ref` for cross-LLM compatibility."""
 
@@ -194,6 +237,7 @@ class SchemaSlimmer:
       deny_tools: set[str] | None = None,
       inline_refs: bool = True,
       canonical_sort: bool = True,
+      preserve_root_unions: bool = False,
   ) -> None:
     self.max_desc_chars = max_desc_chars
     self.max_param_desc_chars = max_param_desc_chars
@@ -201,7 +245,12 @@ class SchemaSlimmer:
     self.deny_tools = deny_tools or set()
     self.inline_refs = inline_refs
     self.canonical_sort = canonical_sort
+    self.preserve_root_unions = preserve_root_unions
     self._tool_param_types: dict[str, dict[str, str]] = {}
+    self._tool_union_contracts: dict[str, UnionContract] = {}
+    self.policy_warnings: list[str] = []
+    self._pending_union_hint: str = ""
+    self._pending_union_contract: UnionContract | None = None
 
   def _resolve_ref(
       self,
@@ -310,6 +359,7 @@ class SchemaSlimmer:
         ]
         if (
             is_root
+            and (k == "allOf" or not self.preserve_root_unions)
             and slimmed_branches
             and all(
                 isinstance(b, dict)
@@ -320,14 +370,28 @@ class SchemaSlimmer:
         ):
           merged_props: dict[str, Any] = dict(out.get("properties") or {})
           branch_req_sets: list[list[str]] = []
-          for b in slimmed_branches:
+          branch_contracts: list[BranchContract] = []
+          for raw_b, b in zip(non_null, slimmed_branches):
             for pk, pv in b["properties"].items():
               merged_props.setdefault(pk, pv)
             b_req = b.get("required")
-            if isinstance(b_req, list):
-              branch_req_sets.append([r for r in b_req if isinstance(r, str)])
-            else:
-              branch_req_sets.append([])
+            req_items = (
+                [r for r in b_req if isinstance(r, str)]
+                if isinstance(b_req, list)
+                else []
+            )
+            branch_req_sets.append(req_items)
+            forbid_extra = (
+                isinstance(raw_b, dict)
+                and raw_b.get("additionalProperties") is False
+            )
+            branch_contracts.append(
+                BranchContract(
+                    required=tuple(req_items),
+                    allowed_props=frozenset(b["properties"].keys()),
+                    forbid_extra=forbid_extra,
+                )
+            )
           if self.canonical_sort:
             merged_props = dict(sorted(merged_props.items()))
           out["properties"] = merged_props
@@ -351,15 +415,23 @@ class SchemaSlimmer:
               for r in branch_req_sets[0]:
                 if r in common and r not in combined_req:
                   combined_req.append(r)
+            if len(branch_contracts) >= 2:
+              contract = UnionContract(kind=k, branches=tuple(branch_contracts))
+              self._pending_union_contract = contract
+              self._pending_union_hint = contract.compact_hint(set(combined_req))
           if combined_req:
             out["required"] = combined_req
           continue
-        out[k] = [
-            self.slim_schema_node(
-                branch, is_root=False, defs=defs, visited=visited, stats=stats
-            )
-            for branch in v
-        ]
+        out[k] = (
+            slimmed_branches
+            if slimmed_branches
+            else [
+                self.slim_schema_node(
+                    branch, is_root=False, defs=defs, visited=visited, stats=stats
+                )
+                for branch in v
+            ]
+        )
         continue
       if k == "type" and isinstance(v, list):
         non_null_types = [t for t in v if isinstance(t, str) and t != "null"]
@@ -383,6 +455,30 @@ class SchemaSlimmer:
       return False
     return True
 
+  def check_policy_typos(self, upstream_tool_names: list[str]) -> list[str]:
+    """Detects exact allow/deny tool patterns that match zero upstream tools and suggests close matches."""
+    warnings: list[str] = []
+    name_set = set(upstream_tool_names)
+    for flag_label, pat_set in (
+        ("--allow-tools", self.allow_tools or set()),
+        ("--deny-tools", self.deny_tools),
+    ):
+      for pat in sorted(pat_set):
+        if "*" in pat or "?" in pat or "[" in pat:
+          if not any(fnmatch.fnmatchcase(n, pat) for n in upstream_tool_names):
+            warnings.append(
+                f"Policy {flag_label} pattern '{pat}' matched 0 upstream tools."
+            )
+          continue
+        if pat not in name_set:
+          close = difflib.get_close_matches(pat, upstream_tool_names, n=1, cutoff=0.6)
+          suggestion = f" (did you mean '{close[0]}'?)" if close else ""
+          warnings.append(
+              f"Policy {flag_label} entry '{pat}' matched 0 upstream tools{suggestion}."
+          )
+    self.policy_warnings = warnings
+    return warnings
+
   def slim_tool(
       self, tool: dict[str, Any], stats: SlimStats | None = None
   ) -> dict[str, Any]:
@@ -392,12 +488,25 @@ class SchemaSlimmer:
       slimmed["description"] = compact_description(
           desc, max_chars=self.max_desc_chars
       )
+    self._pending_union_contract = None
+    self._pending_union_hint = ""
     input_schema = tool.get("inputSchema")
     if isinstance(input_schema, dict):
       slim_schema = self.slim_schema_node(
           input_schema, is_root=True, stats=stats
       )
       slimmed["inputSchema"] = slim_schema
+      if self._pending_union_contract is not None:
+        self._tool_union_contracts[tool["name"]] = self._pending_union_contract
+        if self._pending_union_hint:
+          base_desc = slimmed.get("description", "")
+          slimmed["description"] = (
+              f"{base_desc} {self._pending_union_hint}".strip()
+          )
+      else:
+        self._tool_union_contracts.pop(tool["name"], None)
+      self._pending_union_contract = None
+      self._pending_union_hint = ""
       if isinstance(slim_schema, dict) and isinstance(
           slim_schema.get("properties"), dict
       ):
@@ -408,9 +517,13 @@ class SchemaSlimmer:
         self._tool_param_types[tool["name"]] = param_map
     output_schema = tool.get("outputSchema")
     if isinstance(output_schema, dict):
+      self._pending_union_contract = None
+      self._pending_union_hint = ""
       slim_out_schema = self.slim_schema_node(
           output_schema, is_root=True, stats=stats
       )
+      self._pending_union_contract = None
+      self._pending_union_hint = ""
       if isinstance(slim_out_schema, dict):
         out_props = slim_out_schema.get("properties")
         is_void_schema = slim_out_schema.get("type") == "null" or (
@@ -422,6 +535,44 @@ class SchemaSlimmer:
         if not is_void_schema:
           slimmed["outputSchema"] = slim_out_schema
     return slimmed
+
+  def validate_union_arguments(
+      self, tool_name: str, arguments: dict[str, Any]
+  ) -> str | None:
+    """Validates call arguments against original root `anyOf`/`oneOf` branch contracts."""
+    if not isinstance(arguments, dict):
+      return None
+    contract = self._tool_union_contracts.get(tool_name)
+    if contract is None:
+      return None
+    provided = {k for k, v in arguments.items() if v is not None}
+    matched = 0
+    for branch in contract.branches:
+      if not all(req_k in provided for req_k in branch.required):
+        continue
+      if branch.forbid_extra and not (provided <= branch.allowed_props):
+        continue
+      matched += 1
+    if contract.kind == "anyOf":
+      if matched >= 1:
+        return None
+      return (
+          f"[mcp-slim] Invalid arguments for '{tool_name}': flattened root anyOf "
+          f"requires satisfying at least one branch among {contract.describe_branches()}."
+      )
+    if contract.kind == "oneOf":
+      if matched == 1:
+        return None
+      if matched == 0:
+        return (
+            f"[mcp-slim] Invalid arguments for '{tool_name}': flattened root oneOf "
+            f"requires satisfying exactly one branch among {contract.describe_branches()}."
+        )
+      return (
+          f"[mcp-slim] Invalid arguments for '{tool_name}': arguments matched {matched} "
+          f"mutually exclusive root oneOf branches; satisfy only one of {contract.describe_branches()}."
+      )
+    return None
 
   def coerce_arguments(
       self,
@@ -491,7 +642,7 @@ class SchemaSlimmer:
         except ValueError:
           pass
       elif expected == "boolean":
-        lower = v.strip().lower()
+        lower = v.strip() .lower()
         if lower in ("true", "false"):
           out[k] = lower == "true"
           if stats is not None:
@@ -517,6 +668,10 @@ class SchemaSlimmer:
       self, tools: list[dict[str, Any]], stats: SlimStats | None = None
   ) -> list[dict[str, Any]]:
     before_tokens = estimate_tokens(tools) if stats is not None else 0
+    upstream_names = [
+        t["name"] for t in tools if isinstance(t, dict) and isinstance(t.get("name"), str)
+    ]
+    self.check_policy_typos(upstream_names)
     filtered: list[dict[str, Any]] = []
     for tool in tools:
       name = tool.get("name", "")

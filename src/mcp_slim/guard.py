@@ -1,9 +1,12 @@
-"""Bidirectional secret and credential redaction engine for MCP JSON-RPC traffic."""
+"""Bidirectional secret redaction and session-scoped opaque handle vault for MCP traffic."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import hmac
 import re
+import secrets
 from typing import Any
 
 # High-precision patterns covering modern LLM, cloud, and developer secrets.
@@ -164,12 +167,21 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], re.Pattern[str], str], ...] = (
     ),
 )
 
+_FRAMED_SECRET_CATEGORIES = frozenset({
+    "url_userinfo_secret",
+    "url_query_secret",
+    "env_assignment_secret",
+})
+
+_SECRET_HANDLE_PATTERN = re.compile(r"\[SECRET_REF:[a-z0-9_]+:[0-9a-f]{10}\]")
+
 
 @dataclass
 class RedactionReport:
   """Tracks how many secrets were intercepted and redacted."""
 
   total_redactions: int = 0
+  handles_resolved: int = 0
   by_category: dict[str, int] = field(default_factory=dict)
 
   def record(self, category: str, count: int = 1) -> None:
@@ -180,11 +192,22 @@ class RedactionReport:
 
 
 class SecretGuard:
-  """Scans and redacts secrets from strings and nested JSON structures."""
+  """Scans, redacts, and optionally tokenizes secrets into opaque session handles."""
 
-  def __init__(self, enabled: bool = True) -> None:
+  def __init__(self, enabled: bool = True, vault_handles: bool = False) -> None:
     self.enabled = enabled
+    self.vault_handles = vault_handles
     self.report = RedactionReport()
+    self._vault_key = secrets.token_bytes(16)
+    self._handle_to_secret: dict[str, str] = {}
+
+  def _mint_handle(self, category: str, raw_secret: str) -> str:
+    digest = hmac.new(
+        self._vault_key, raw_secret.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:10]
+    handle = f"[SECRET_REF:{category}:{digest}]"
+    self._handle_to_secret[handle] = raw_secret
+    return handle
 
   def redact_text(self, text: str) -> str:
     if not self.enabled or not text:
@@ -193,9 +216,31 @@ class SecretGuard:
     for name, triggers, pattern, replacement in _SECRET_RULES:
       if not any(t in current for t in triggers):
         continue
-      current, count = pattern.subn(replacement, current)
-      if count:
-        self.report.record(name, count)
+      if self.vault_handles and name != "prompt_injection":
+        if name in _FRAMED_SECRET_CATEGORIES:
+
+          def _replace_framed(match: re.Match[str], cat: str = name) -> str:
+            secret_val = match.group(2)
+            if secret_val.startswith("[SECRET_REF:") or secret_val.startswith("[REDACTED:"):
+              return match.group(0)
+            prefix = match.group(1)
+            suffix = match.group(3) if (match.lastindex or 0) >= 3 else ""
+            return f"{prefix}{self._mint_handle(cat, secret_val)}{suffix}"
+
+          updated, count = pattern.subn(_replace_framed, current)
+        else:
+
+          def _replace_direct(match: re.Match[str], cat: str = name) -> str:
+            return self._mint_handle(cat, match.group(0))
+
+          updated, count = pattern.subn(_replace_direct, current)
+        if updated != current and count:
+          current = updated
+          self.report.record(name, count)
+      else:
+        current, count = pattern.subn(replacement, current)
+        if count:
+          self.report.record(name, count)
     return current
 
   def redact_value(self, value: Any) -> Any:
@@ -207,4 +252,31 @@ class SecretGuard:
       return [self.redact_value(item) for item in value]
     if isinstance(value, dict):
       return {k: self.redact_value(v) for k, v in value.items()}
+    return value
+
+  def resolve_handles_in_text(self, text: str) -> str:
+    """Replaces session-scoped `[SECRET_REF:...]` handles with raw secrets on outbound calls."""
+    if not self.enabled or not self.vault_handles or "[SECRET_REF:" not in text:
+      return text
+
+    def _sub_handle(match: re.Match[str]) -> str:
+      handle = match.group(0)
+      raw = self._handle_to_secret.get(handle)
+      if raw is not None:
+        self.report.handles_resolved += 1
+        return raw
+      return handle
+
+    return _SECRET_HANDLE_PATTERN.sub(_sub_handle, text)
+
+  def resolve_handles_in_value(self, value: Any) -> Any:
+    """Recursively resolves opaque `[SECRET_REF:...]` handles across structured tool arguments."""
+    if not self.enabled or not self.vault_handles:
+      return value
+    if isinstance(value, str):
+      return self.resolve_handles_in_text(value)
+    if isinstance(value, list):
+      return [self.resolve_handles_in_value(item) for item in value]
+    if isinstance(value, dict):
+      return {k: self.resolve_handles_in_value(v) for k, v in value.items()}
     return value
