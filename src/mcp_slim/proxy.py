@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 import sys
 import time
 from typing import Any, Callable, Awaitable
@@ -17,7 +18,7 @@ from .slimmer import (
     SlimStats,
     estimate_tokens,
 )
-from .telemetry import StatsLedger
+from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
 
 
 class MCPProxy:
@@ -35,6 +36,9 @@ class MCPProxy:
       bridge_socket: str | None = None,
       no_stats: bool = False,
       stats_ledger: StatsLedger | None = None,
+      block_sampling: bool = False,
+      otel_exporter: OTelSpanExporter | None = None,
+      otel_jsonl_path: Path | str | None = None,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -49,24 +53,63 @@ class MCPProxy:
     self.cli_only = cli_only
     self.bridge_socket = bridge_socket
     self.no_stats = no_stats
+    self.block_sampling = block_sampling
     self.stats_ledger = (
         stats_ledger
         if stats_ledger is not None
         else StatsLedger(enabled=not no_stats)
     )
+    if otel_exporter is not None:
+      self.otel_exporter: OTelSpanExporter | None = otel_exporter
+    else:
+      candidate_otel = OTelSpanExporter(path=otel_jsonl_path)
+      self.otel_exporter = candidate_otel if candidate_otel.enabled else None
     self._pending_methods: dict[str | int, str] = {}
+    self._pending_tool_names: dict[str | int, str] = {}
+    self._pending_server_methods: dict[str | int, str] = {}
     self._pending_cache_keys: dict[str | int, str] = {}
     self._read_cache: dict[str, tuple[float, dict[str, Any]]] = {}
     self._local_responses: list[str] = []
+    self._local_server_responses: list[str] = []
+    self._inflight_spans: dict[tuple[str, str | int], dict[str, Any]] = {}
     self._cached_tools: dict[str, dict[str, Any]] = {}
     self._bridge_waiters: dict[str, asyncio.Future[dict[str, Any]]] = {}
     self._bridge_seq: int = 0
 
   def pop_local_responses(self) -> list[str]:
-    """Returns any locally synthesized JSON-RPC responses (e.g. from mcp_search_tools)."""
+    """Returns any locally synthesized JSON-RPC responses destined for the MCP client."""
     items = list(self._local_responses)
     self._local_responses.clear()
     return items
+
+  def pop_local_server_responses(self) -> list[str]:
+    """Returns any locally synthesized JSON-RPC responses destined for the upstream MCP server."""
+    items = list(self._local_server_responses)
+    self._local_server_responses.clear()
+    return items
+
+  def _emit_span(
+      self,
+      *,
+      name: str,
+      kind: str = "CLIENT",
+      start_ns: int | None = None,
+      end_ns: int | None = None,
+      is_error: bool = False,
+      error_message: str | None = None,
+      attributes: dict[str, Any] | None = None,
+  ) -> None:
+    if self.otel_exporter is None or not self.otel_exporter.enabled:
+      return
+    self.otel_exporter.emit_span(
+        name=name,
+        kind=kind,
+        start_time_unix_nano=start_ns,
+        end_time_unix_nano=end_ns,
+        is_error=is_error,
+        error_message=error_message,
+        attributes=attributes,
+    )
 
   def process_client_message(self, raw_line: str) -> str:
     """Processes a client -> server JSON-RPC line.
@@ -83,7 +126,86 @@ class MCPProxy:
     msg_id = msg.get("id")
     method = msg.get("method")
     params = msg.get("params")
+    start_wall_ns = time.time_ns()
+    start_mono_ns = time.perf_counter_ns()
 
+    # Client -> server JSON-RPC response (e.g. replying to server-initiated sampling/createMessage)
+    if method is None and ("result" in msg or "error" in msg):
+      srv_method = (
+          self._pending_server_methods.pop(msg_id, None)
+          if msg_id is not None
+          else None
+      )
+      inflight_srv = (
+          self._inflight_spans.pop(("server", msg_id), None)
+          if msg_id is not None
+          else None
+      )
+      red_before = self.secret_guard.report.total_redactions
+      wire_in = len(raw_line.encode("utf-8"))
+
+      if "result" in msg:
+        if srv_method is None and isinstance(msg.get("result"), dict) and "role" in msg["result"] and "content" in msg["result"]:
+          self.stats.sampling_guarded += 1
+        msg["result"] = self.secret_guard.redact_value(
+            msg["result"], force_redact=True
+        )
+        serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+        serialized = self.secret_guard.redact_text(serialized, force_redact=True)
+        out_line = serialized + "\n"
+        wire_out = len(out_line.encode("utf-8"))
+        red_delta = self.secret_guard.report.total_redactions - red_before
+        if inflight_srv is not None:
+          elapsed_ns = max(0, time.perf_counter_ns() - inflight_srv["start_mono_ns"])
+          tok_b = inflight_srv.get("tok_before", 0)
+          tok_a = inflight_srv.get("tok_after", 0)
+          self._emit_span(
+              name=f"mcp.{inflight_srv['method']}",
+              kind="SERVER",
+              start_ns=inflight_srv["start_wall_ns"],
+              end_ns=inflight_srv["start_wall_ns"] + elapsed_ns,
+              is_error=False,
+              attributes={
+                  "mcp.method.name": inflight_srv["method"],
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.tokens.before": tok_b,
+                  "mcp_slim.tokens.after": tok_a,
+                  "mcp_slim.tokens.saved": max(0, tok_b - tok_a),
+                  "mcp_slim.wire_bytes.before": inflight_srv.get("wire_in", 0) + wire_in,
+                  "mcp_slim.wire_bytes.after": inflight_srv.get("wire_out", 0) + wire_out,
+                  "mcp_slim.secrets_redacted": inflight_srv.get("redactions_on_req", 0) + red_delta,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": False,
+              },
+          )
+        return out_line
+
+      err_obj = msg.get("error")
+      err_msg = (
+          str(err_obj.get("message", "RPC error"))
+          if isinstance(err_obj, dict)
+          else "RPC error"
+      )
+      if inflight_srv is not None:
+        elapsed_ns = max(0, time.perf_counter_ns() - inflight_srv["start_mono_ns"])
+        self._emit_span(
+            name=f"mcp.{inflight_srv['method']}",
+            kind="SERVER",
+            start_ns=inflight_srv["start_wall_ns"],
+            end_ns=inflight_srv["start_wall_ns"] + elapsed_ns,
+            is_error=True,
+            error_message=err_msg,
+            attributes={
+                "mcp.method.name": inflight_srv["method"],
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.secrets_redacted": inflight_srv.get("redactions_on_req", 0),
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": False,
+            },
+        )
+      return raw_line
+
+    resolved_tool_name: str | None = None
     if method == "tools/call" and isinstance(params, dict):
       tool_name = params.get("name")
       arguments = params.get("arguments") or {}
@@ -107,8 +229,21 @@ class MCPProxy:
                 "isError": False,
             },
         }
-        self._local_responses.append(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        reply_line = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+        self._local_responses.append(reply_line)
+        elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+        self._emit_span(
+            name=f"mcp.tools/call {LazyToolBroker.SEARCH_TOOL_NAME}",
+            kind="INTERNAL",
+            start_ns=start_wall_ns,
+            end_ns=start_wall_ns + elapsed_ns,
+            attributes={
+                "mcp.method.name": "tools/call",
+                "mcp.tool.name": LazyToolBroker.SEARCH_TOOL_NAME,
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": False,
+            },
         )
         return ""
 
@@ -123,6 +258,9 @@ class MCPProxy:
           tool_name = params["name"]
           arguments = params["arguments"]
 
+      if isinstance(tool_name, str):
+        resolved_tool_name = tool_name
+
       if isinstance(tool_name, str) and not self.schema_slimmer.is_tool_allowed(tool_name):
         self.stats.blocked_calls += 1
         reason_suffix = (
@@ -131,6 +269,10 @@ class MCPProxy:
             and not self.schema_slimmer.is_read_only_tool(tool_name)
             else ""
         )
+        block_msg = (
+            f"[mcp-slim] Tool '{tool_name}' is blocked by proxy "
+            f"allow/deny policy{reason_suffix}."
+        )
         blocked_payload = {
             "jsonrpc": msg.get("jsonrpc", "2.0"),
             "id": msg_id,
@@ -138,10 +280,7 @@ class MCPProxy:
                 "content": [
                     {
                         "type": "text",
-                        "text": (
-                            f"[mcp-slim] Tool '{tool_name}' is blocked by proxy "
-                            f"allow/deny policy{reason_suffix}."
-                        ),
+                        "text": block_msg,
                     }
                 ],
                 "isError": True,
@@ -150,6 +289,22 @@ class MCPProxy:
         self._local_responses.append(
             json.dumps(blocked_payload, ensure_ascii=False, separators=(",", ":"))
             + "\n"
+        )
+        elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+        self._emit_span(
+            name=f"mcp.tools/call {tool_name}",
+            kind="CLIENT",
+            start_ns=start_wall_ns,
+            end_ns=start_wall_ns + elapsed_ns,
+            is_error=True,
+            error_message=block_msg,
+            attributes={
+                "mcp.method.name": "tools/call",
+                "mcp.tool.name": tool_name,
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": True,
+            },
         )
         return ""
 
@@ -175,6 +330,22 @@ class MCPProxy:
               json.dumps(invalid_payload, ensure_ascii=False, separators=(",", ":"))
               + "\n"
           )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.tools/call {tool_name}",
+              kind="CLIENT",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=union_err,
+              attributes={
+                  "mcp.method.name": "tools/call",
+                  "mcp.tool.name": tool_name,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+              },
+          )
           return ""
 
       if self.cache_ttl > 0.0 and isinstance(tool_name, str):
@@ -198,6 +369,20 @@ class MCPProxy:
                 json.dumps(hit_payload, ensure_ascii=False, separators=(",", ":"))
                 + "\n"
             )
+            elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+            self._emit_span(
+                name=f"mcp.tools/call {tool_name}",
+                kind="CLIENT",
+                start_ns=start_wall_ns,
+                end_ns=start_wall_ns + elapsed_ns,
+                attributes={
+                    "mcp.method.name": "tools/call",
+                    "mcp.tool.name": tool_name,
+                    "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                    "mcp_slim.cache_hit": True,
+                    "mcp_slim.blocked": False,
+                },
+            )
             return ""
           if msg_id is not None:
             self._pending_cache_keys[msg_id] = cache_key
@@ -206,7 +391,10 @@ class MCPProxy:
 
     if msg_id is not None and isinstance(method, str):
       self._pending_methods[msg_id] = method
+      if resolved_tool_name is not None:
+        self._pending_tool_names[msg_id] = resolved_tool_name
 
+    red_req_before = self.secret_guard.report.total_redactions
     if method == "tools/call" and isinstance(params, dict):
       if "arguments" in params:
         redacted_args = self.secret_guard.redact_value(params["arguments"])
@@ -216,8 +404,25 @@ class MCPProxy:
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
       if not self.secret_guard.vault_handles:
         serialized = self.secret_guard.redact_text(serialized)
+      red_req_delta = self.secret_guard.report.total_redactions - red_req_before
+      if self.otel_exporter is not None and msg_id is not None:
+        self._inflight_spans[("client", msg_id)] = {
+            "start_wall_ns": start_wall_ns,
+            "start_mono_ns": start_mono_ns,
+            "method": method,
+            "tool_name": resolved_tool_name,
+            "redactions_on_req": red_req_delta,
+        }
       return serialized + "\n"
 
+    if self.otel_exporter is not None and msg_id is not None and isinstance(method, str):
+      self._inflight_spans[("client", msg_id)] = {
+          "start_wall_ns": start_wall_ns,
+          "start_mono_ns": start_mono_ns,
+          "method": method,
+          "tool_name": resolved_tool_name,
+          "redactions_on_req": 0,
+      }
     return raw_line
 
   def process_server_message(self, raw_line: str) -> str:
@@ -230,8 +435,116 @@ class MCPProxy:
       return raw_line
 
     msg_id = msg.get("id")
+    srv_method = msg.get("method")
+
+    # Server-initiated requests / notifications (e.g. sampling/createMessage, elicitation/create)
+    if isinstance(srv_method, str) and "result" not in msg and "error" not in msg:
+      srv_params = msg.get("params")
+      start_wall_ns = time.time_ns()
+      start_mono_ns = time.perf_counter_ns()
+      if srv_method == "sampling/createMessage":
+        if self.block_sampling:
+          self.stats.blocked_calls += 1
+          err_text = (
+              "[mcp-slim] Server-initiated sampling/createMessage is blocked by "
+              "proxy policy (--block-sampling)."
+          )
+          if msg_id is not None:
+            err_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "error": {"code": -32600, "message": err_text},
+            }
+            self._local_server_responses.append(
+                json.dumps(err_payload, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name="mcp.sampling/createMessage",
+              kind="SERVER",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=err_text,
+              attributes={
+                  "mcp.method.name": "sampling/createMessage",
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+              },
+          )
+          return ""
+
+        self.stats.sampling_guarded += 1
+        red_before = self.secret_guard.report.total_redactions
+        tok_b_0 = self.stats.output_tokens_before
+        tok_a_0 = self.stats.output_tokens_after
+        if isinstance(srv_params, dict):
+          new_params = dict(srv_params)
+          if isinstance(new_params.get("messages"), list):
+            slim_msgs = self.output_slimmer.slim_prompt_result(
+                {"messages": new_params["messages"]}, stats=self.stats
+            )
+            new_params["messages"] = slim_msgs["messages"]
+          if isinstance(new_params.get("systemPrompt"), str) and new_params["systemPrompt"]:
+            sp_before = estimate_tokens(new_params["systemPrompt"])
+            slim_sp = self.output_slimmer.slim_text(new_params["systemPrompt"])
+            sp_after = estimate_tokens(slim_sp)
+            self.stats.output_tokens_before += sp_before
+            self.stats.output_tokens_after += sp_after
+            new_params["systemPrompt"] = slim_sp
+          msg["params"] = self.secret_guard.redact_value(
+              new_params, force_redact=True
+          )
+        serialized_srv = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+        serialized_srv = self.secret_guard.redact_text(
+            serialized_srv, force_redact=True
+        )
+        out_srv_line = serialized_srv + "\n"
+        wire_in = len(raw_line.encode("utf-8"))
+        wire_out = len(out_srv_line.encode("utf-8"))
+        self.stats.wire_bytes_before += wire_in
+        self.stats.wire_bytes_after += wire_out
+        if msg_id is not None:
+          self._pending_server_methods[msg_id] = srv_method
+          if self.otel_exporter is not None:
+            self._inflight_spans[("server", msg_id)] = {
+                "start_wall_ns": start_wall_ns,
+                "start_mono_ns": start_mono_ns,
+                "method": srv_method,
+                "wire_in": wire_in,
+                "wire_out": wire_out,
+                "tok_before": self.stats.output_tokens_before - tok_b_0,
+                "tok_after": self.stats.output_tokens_after - tok_a_0,
+                "redactions_on_req": self.secret_guard.report.total_redactions - red_before,
+            }
+        return out_srv_line
+
+      if msg_id is not None:
+        self._pending_server_methods[msg_id] = srv_method
+      if isinstance(srv_params, dict) and self.secret_guard.enabled:
+        red_before = self.secret_guard.report.total_redactions
+        clean_params = self.secret_guard.redact_value(
+            srv_params, force_redact=True
+        )
+        if clean_params != srv_params or self.secret_guard.report.total_redactions > red_before:
+          msg["params"] = clean_params
+          return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+      return raw_line
+
     method = (
         self._pending_methods.pop(msg_id, None) if msg_id is not None else None
+    )
+    tool_name = (
+        self._pending_tool_names.pop(msg_id, None)
+        if msg_id is not None
+        else None
+    )
+    inflight_cli = (
+        self._inflight_spans.pop(("client", msg_id), None)
+        if msg_id is not None
+        else None
     )
     pending_cache_key = (
         self._pending_cache_keys.pop(msg_id, None)
@@ -241,6 +554,11 @@ class MCPProxy:
     result = msg.get("result")
 
     if isinstance(result, dict):
+      tok_before_0 = self.stats.total_tokens_before
+      tok_after_0 = self.stats.total_tokens_after
+      refs_0 = self.stats.refs_inlined
+      red_0 = self.secret_guard.report.total_redactions
+
       if method == "tools/list" or isinstance(result.get("tools"), list):
         raw_tools = result.get("tools")
         if isinstance(raw_tools, list):
@@ -279,6 +597,45 @@ class MCPProxy:
           if self.secret_guard.vault_handles
           else self.secret_guard.redact_text(serialized)
       )
+      out_line = redacted_str + "\n"
+      wire_in = len(raw_line.encode("utf-8"))
+      wire_out = len(out_line.encode("utf-8"))
+
+      if inflight_cli is not None:
+        elapsed_ns = max(0, time.perf_counter_ns() - inflight_cli["start_mono_ns"])
+        eff_method = method or inflight_cli["method"]
+        eff_tool = tool_name or inflight_cli.get("tool_name")
+        span_name = (
+            f"mcp.{eff_method} {eff_tool}" if eff_tool else f"mcp.{eff_method}"
+        )
+        tok_b_delta = self.stats.total_tokens_before - tok_before_0
+        tok_a_delta = self.stats.total_tokens_after - tok_after_0
+        is_err = bool(result.get("isError"))
+        self._emit_span(
+            name=span_name,
+            kind="CLIENT",
+            start_ns=inflight_cli["start_wall_ns"],
+            end_ns=inflight_cli["start_wall_ns"] + elapsed_ns,
+            is_error=is_err,
+            attributes={
+                "mcp.method.name": eff_method,
+                "mcp.tool.name": eff_tool,
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.tokens.before": tok_b_delta,
+                "mcp_slim.tokens.after": tok_a_delta,
+                "mcp_slim.tokens.saved": max(0, tok_b_delta - tok_a_delta),
+                "mcp_slim.wire_bytes.before": wire_in,
+                "mcp_slim.wire_bytes.after": wire_out,
+                "mcp_slim.refs_inlined": self.stats.refs_inlined - refs_0,
+                "mcp_slim.secrets_redacted": (
+                    inflight_cli.get("redactions_on_req", 0)
+                    + (self.secret_guard.report.total_redactions - red_0)
+                ),
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": False,
+            },
+        )
+
       if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
         waiter = self._bridge_waiters.pop(msg_id)
         if not waiter.done():
@@ -301,10 +658,39 @@ class MCPProxy:
             )
         except json.JSONDecodeError:
           pass
-      out_line = redacted_str + "\n"
-      self.stats.wire_bytes_before += len(raw_line.encode("utf-8"))
-      self.stats.wire_bytes_after += len(out_line.encode("utf-8"))
+      self.stats.wire_bytes_before += wire_in
+      self.stats.wire_bytes_after += wire_out
       return out_line
+
+    if "error" in msg and inflight_cli is not None:
+      elapsed_ns = max(0, time.perf_counter_ns() - inflight_cli["start_mono_ns"])
+      eff_method = method or inflight_cli["method"]
+      eff_tool = tool_name or inflight_cli.get("tool_name")
+      span_name = (
+          f"mcp.{eff_method} {eff_tool}" if eff_tool else f"mcp.{eff_method}"
+      )
+      err_obj = msg.get("error")
+      err_msg = (
+          str(err_obj.get("message", "RPC error"))
+          if isinstance(err_obj, dict)
+          else "RPC error"
+      )
+      self._emit_span(
+          name=span_name,
+          kind="CLIENT",
+          start_ns=inflight_cli["start_wall_ns"],
+          end_ns=inflight_cli["start_wall_ns"] + elapsed_ns,
+          is_error=True,
+          error_message=err_msg,
+          attributes={
+              "mcp.method.name": eff_method,
+              "mcp.tool.name": eff_tool,
+              "mcp.request.id": str(msg_id) if msg_id is not None else None,
+              "mcp_slim.secrets_redacted": inflight_cli.get("redactions_on_req", 0),
+              "mcp_slim.cache_hit": False,
+              "mcp_slim.blocked": False,
+          },
+      )
 
     if isinstance(msg_id, str) and msg_id in self._bridge_waiters:
       waiter = self._bridge_waiters.pop(msg_id)
@@ -398,6 +784,8 @@ class MCPProxy:
 
   async def run_stdio(self, command: list[str]) -> int:
     """Spawns the upstream MCP server and proxies stdio streams."""
+    if self.otel_exporter is not None and self.otel_exporter.server_label == "unknown":
+      self.otel_exporter.server_label = derive_server_label(command)
     proc = await asyncio.create_subprocess_exec(
         *command,
         stdin=asyncio.subprocess.PIPE,
@@ -482,6 +870,8 @@ class MCPProxy:
           processed = self.process_server_message(
               line.decode("utf-8", errors="replace")
           )
+          for srv_reply in self.pop_local_server_responses():
+            await _send_upstream(srv_reply)
           if processed:
             sys.stdout.write(processed)
             sys.stdout.flush()

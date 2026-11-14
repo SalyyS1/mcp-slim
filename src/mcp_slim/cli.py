@@ -488,6 +488,7 @@ def wrap_config(
     lazy: bool = False,
     runner: str = "mcp-slim",
     read_only: bool = False,
+    block_sampling: bool = False,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -513,6 +514,8 @@ def wrap_config(
       prefix.append("--lazy")
     if read_only:
       prefix.append("--read-only")
+    if block_sampling:
+      prefix.append("--block-sampling")
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -616,6 +619,17 @@ def main(argv: list[str] | None = None) -> int:
       help="Tokenize intercepted secrets into session-scoped [SECRET_REF:...] handles and resolve them on outbound tool calls",
   )
   run_p.add_argument(
+      "--block-sampling",
+      action="store_true",
+      help="Reject server-initiated sampling/createMessage requests locally with a JSON-RPC policy error",
+  )
+  run_p.add_argument(
+      "--otel-jsonl",
+      type=Path,
+      default=None,
+      help="Append structured OpenTelemetry-compatible JSONL spans per MCP operation (or set MCP_SLIM_OTEL_JSONL)",
+  )
+  run_p.add_argument(
       "--preserve-root-unions",
       action="store_true",
       help="Keep root anyOf/oneOf JSON Schemas unflattened instead of adapting them for strict LLM providers",
@@ -699,6 +713,11 @@ def main(argv: list[str] | None = None) -> int:
       "--read-only",
       action="store_true",
       help="Wrap servers with --read-only tool policy enforcement",
+  )
+  wrap_p.add_argument(
+      "--block-sampling",
+      action="store_true",
+      help="Wrap servers with --block-sampling policy enforcement",
   )
   wrap_p.add_argument(
       "--runner",
@@ -812,6 +831,7 @@ def main(argv: list[str] | None = None) -> int:
         lazy=parsed.lazy,
         runner=parsed.runner,
         read_only=parsed.read_only,
+        block_sampling=parsed.block_sampling,
     )
 
   if parsed.subcommand == "bridge":
@@ -861,6 +881,8 @@ def main(argv: list[str] | None = None) -> int:
         stats_ledger=StatsLedger(
             path=parsed.stats_file, enabled=not parsed.no_stats
         ),
+        block_sampling=parsed.block_sampling,
+        otel_jsonl_path=parsed.otel_jsonl,
     )
     return asyncio.run(proxy.run_stdio(cmd))
 

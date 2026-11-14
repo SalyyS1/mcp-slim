@@ -1,6 +1,6 @@
 """mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "0.8.0"
+__version__ = "0.9.0"
 
 from .guard import RedactionReport, SecretGuard
 from .proxy import MCPProxy
@@ -16,12 +16,13 @@ from .slimmer import (
     build_audit_sarif,
     estimate_tokens,
 )
-from .telemetry import StatsLedger, derive_server_label
+from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
 
 __all__ = [
     "BranchContract",
     "LazyToolBroker",
     "MCPProxy",
+    "OTelSpanExporter",
     "OutputSlimmer",
     "RedactionReport",
     "SchemaSlimmer",

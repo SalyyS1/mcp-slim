@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import difflib
 import fnmatch
@@ -9,6 +10,7 @@ import json
 import math
 import re
 from typing import Any
+import urllib.parse
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _WHITESPACE_RUN = re.compile(r"[ \t]{2,}")
@@ -157,6 +159,9 @@ class SlimStats:
   tools_total: int = 0
   tools_kept: int = 0
   refs_inlined: int = 0
+  refs_deduped: int = 0
+  cycles_broken: int = 0
+  sampling_guarded: int = 0
   cache_hits: int = 0
   args_coerced: int = 0
   blocked_calls: int = 0
@@ -246,6 +251,87 @@ _ANNOTATION_BOOL_KEYS = (
 )
 
 
+@dataclass
+class _RefContext:
+  """Per-schema traversal state for cycle-aware DAG memoization and JSON Pointer resolution."""
+
+  root_doc: dict[str, Any]
+  memo: dict[str, tuple[Any, int]] = field(default_factory=dict)
+  total_inlined: int = 0
+  cycle_tainted: int = 0
+
+
+def _decode_pointer_segment(segment: str) -> str:
+  """Decodes a single RFC 6901 JSON Pointer segment (including URL-escaped fragments)."""
+  return urllib.parse.unquote(segment).replace("~1", "/").replace("~0", "~")
+
+
+def _build_cycle_stub(target: dict[str, Any]) -> dict[str, Any]:
+  """Synthesizes a compact, cycle-safe stub preserving the target's normalized JSON Schema type."""
+  raw_type = target.get("type")
+  if isinstance(raw_type, list):
+    non_null = [t for t in raw_type if isinstance(t, str) and t != "null"]
+    norm_type = non_null[0] if len(non_null) == 1 else "object"
+  elif isinstance(raw_type, str) and raw_type:
+    norm_type = raw_type
+  else:
+    norm_type = "object"
+  return {"type": norm_type}
+
+
+def _resolve_pointer_target(
+    ref_str: str, root_doc: dict[str, Any], defs: dict[str, Any]
+) -> tuple[str, dict[str, Any], bool] | None:
+  """Resolves an internal JSON Pointer (`#`, `#/$defs/...`, `#/definitions/...`, `#/properties/...`)."""
+  if ref_str == "#":
+    return ("#", root_doc, False)
+  if not ref_str.startswith("#/"):
+    return None
+  segments = [_decode_pointer_segment(s) for s in ref_str[2:].split("/")]
+  if len(segments) >= 2 and segments[0] in ("$defs", "definitions"):
+    def_name = segments[1]
+    base_def = defs.get(def_name)
+    if isinstance(base_def, dict):
+      root_defs = root_doc.get(segments[0])
+      is_local = not (
+          isinstance(root_defs, dict) and root_defs.get(def_name) is base_def
+      )
+      cur: Any = base_def
+      for extra_seg in segments[2:]:
+        if isinstance(cur, dict) and extra_seg in cur:
+          cur = cur[extra_seg]
+        elif (
+            isinstance(cur, list)
+            and extra_seg.isdigit()
+            and int(extra_seg) < len(cur)
+        ):
+          cur = cur[int(extra_seg)]
+        else:
+          cur = None
+          break
+      if isinstance(cur, dict):
+        tail = "/".join(segments[1:])
+        canon = (
+            f"#/$local/{id(base_def)}/{tail}"
+            if is_local
+            else f"#/$defs/{tail}"
+        )
+        return (canon, cur, is_local)
+
+  cur = root_doc
+  for seg in segments:
+    if isinstance(cur, dict) and seg in cur:
+      cur = cur[seg]
+    elif isinstance(cur, list) and seg.isdigit() and int(seg) < len(cur):
+      cur = cur[int(seg)]
+    else:
+      return None
+  if isinstance(cur, dict):
+    canon = "#/" + "/".join(segments)
+    return (canon, cur, False)
+  return None
+
+
 class SchemaSlimmer:
   """Minifies MCP `tools/list` schemas and inlines `$defs`/`$ref` for cross-LLM compatibility."""
 
@@ -281,24 +367,55 @@ class SchemaSlimmer:
       defs: dict[str, Any],
       visited: frozenset[str],
       stats: SlimStats | None = None,
+      ctx: _RefContext | None = None,
   ) -> dict[str, Any] | None:
-    for prefix in ("#/$defs/", "#/definitions/"):
-      if ref_str.startswith(prefix):
-        def_name = ref_str[len(prefix) :]
-        if def_name in visited:
-          return {"type": "object"}
-        target = defs.get(def_name)
-        if isinstance(target, dict):
-          if stats is not None:
-            stats.refs_inlined += 1
-          return self.slim_schema_node(
-              target,
-              is_root=False,
-              defs=defs,
-              visited=visited | {def_name},
-              stats=stats,
-          )
-    return None
+    effective_ctx = ctx or _RefContext(root_doc={"$defs": defs})
+    resolved_target = _resolve_pointer_target(
+        ref_str, effective_ctx.root_doc, defs
+    )
+    if resolved_target is None:
+      return None
+    canon_key, target, is_local = resolved_target
+
+    if not is_local and canon_key in effective_ctx.memo:
+      cached_node, nested_inlined = effective_ctx.memo[canon_key]
+      effective_ctx.total_inlined += 1 + nested_inlined
+      if stats is not None:
+        stats.refs_inlined += 1 + nested_inlined
+        stats.refs_deduped += 1
+      return copy.deepcopy(cached_node)
+
+    if canon_key in visited:
+      effective_ctx.cycle_tainted += 1
+      if stats is not None:
+        stats.cycles_broken += 1
+      return _build_cycle_stub(target)
+
+    effective_ctx.total_inlined += 1
+    if stats is not None:
+      stats.refs_inlined += 1
+    inlined_after_self = effective_ctx.total_inlined
+    taint_before = effective_ctx.cycle_tainted
+
+    slimmed_target = self._slim_schema_node_impl(
+        target,
+        is_root=False,
+        defs=defs,
+        visited=visited | {canon_key},
+        stats=stats,
+        ctx=effective_ctx,
+    )
+    nested_inlined = effective_ctx.total_inlined - inlined_after_self
+    if (
+        not is_local
+        and effective_ctx.cycle_tainted == taint_before
+        and isinstance(slimmed_target, dict)
+    ):
+      effective_ctx.memo[canon_key] = (
+          copy.deepcopy(slimmed_target),
+          nested_inlined,
+      )
+    return slimmed_target if isinstance(slimmed_target, dict) else None
 
   def slim_schema_node(
       self,
@@ -310,16 +427,50 @@ class SchemaSlimmer:
   ) -> Any:
     if not isinstance(node, dict):
       return node
+    initial_visited = visited | {"#"} if is_root and not visited else visited
+    ctx = _RefContext(root_doc=node)
+    return self._slim_schema_node_impl(
+        node,
+        is_root=is_root,
+        defs=defs,
+        visited=initial_visited,
+        stats=stats,
+        ctx=ctx,
+    )
+
+  def _slim_schema_node_impl(
+      self,
+      node: Any,
+      is_root: bool,
+      defs: dict[str, Any] | None,
+      visited: frozenset[str],
+      stats: SlimStats | None,
+      ctx: _RefContext,
+  ) -> Any:
+    if not isinstance(node, dict):
+      return node
 
     if defs is None:
-      defs = {}
+      scoped_defs: dict[str, Any] = {}
       if isinstance(node.get("$defs"), dict):
-        defs.update(node["$defs"])
+        scoped_defs.update(node["$defs"])
       if isinstance(node.get("definitions"), dict):
-        defs.update(node["definitions"])
+        scoped_defs.update(node["definitions"])
+    elif isinstance(node.get("$defs"), dict) or isinstance(
+        node.get("definitions"), dict
+    ):
+      scoped_defs = dict(defs)
+      if isinstance(node.get("$defs"), dict):
+        scoped_defs.update(node["$defs"])
+      if isinstance(node.get("definitions"), dict):
+        scoped_defs.update(node["definitions"])
+    else:
+      scoped_defs = defs
 
     if self.inline_refs and "$ref" in node and isinstance(node["$ref"], str):
-      resolved = self._resolve_ref(node["$ref"], defs, visited, stats=stats)
+      resolved = self._resolve_ref(
+          node["$ref"], scoped_defs, visited, stats=stats, ctx=ctx
+      )
       if resolved is not None:
         merged = dict(resolved)
         for k, v in node.items():
@@ -328,12 +479,38 @@ class SchemaSlimmer:
               compact = compact_description(v, max_chars=self.max_param_desc_chars)
               if compact:
                 merged[k] = compact
+            elif isinstance(v, (dict, list)):
+              merged[k] = self._slim_schema_node_impl(
+                  v,
+                  is_root=False,
+                  defs=scoped_defs,
+                  visited=visited,
+                  stats=stats,
+                  ctx=ctx,
+              )
             else:
               merged[k] = v
         return merged
 
     out: dict[str, Any] = {}
     for k, v in node.items():
+      if (
+          k == "additionalProperties"
+          and isinstance(v, dict)
+          and v
+          and "properties" not in node
+      ):
+        slimmed_ap = self._slim_schema_node_impl(
+            v,
+            is_root=False,
+            defs=scoped_defs,
+            visited=visited,
+            stats=stats,
+            ctx=ctx,
+        )
+        if isinstance(slimmed_ap, dict) and slimmed_ap:
+          out[k] = slimmed_ap
+        continue
       if k in _REDUNDANT_SCHEMA_KEYS or (isinstance(k, str) and k.startswith("x-")):
         continue
       if k == "description" and isinstance(v, str):
@@ -345,8 +522,13 @@ class SchemaSlimmer:
         props: dict[str, Any] = {}
         prop_items = sorted(v.items()) if self.canonical_sort else v.items()
         for prop_name, prop_schema in prop_items:
-          slimmed_prop = self.slim_schema_node(
-              prop_schema, is_root=False, defs=defs, visited=visited, stats=stats
+          slimmed_prop = self._slim_schema_node_impl(
+              prop_schema,
+              is_root=False,
+              defs=scoped_defs,
+              visited=visited,
+              stats=stats,
+              ctx=ctx,
           )
           if isinstance(slimmed_prop, dict):
             desc = slimmed_prop.get("description", "")
@@ -355,10 +537,42 @@ class SchemaSlimmer:
           props[prop_name] = slimmed_prop
         out[k] = props
         continue
-      if k == "items" and isinstance(v, dict):
-        out[k] = self.slim_schema_node(
-            v, is_root=False, defs=defs, visited=visited, stats=stats
-        )
+      if k == "items":
+        if isinstance(v, dict):
+          out[k] = self._slim_schema_node_impl(
+              v,
+              is_root=False,
+              defs=scoped_defs,
+              visited=visited,
+              stats=stats,
+              ctx=ctx,
+          )
+          continue
+        if isinstance(v, list):
+          out[k] = [
+              self._slim_schema_node_impl(
+                  elem,
+                  is_root=False,
+                  defs=scoped_defs,
+                  visited=visited,
+                  stats=stats,
+                  ctx=ctx,
+              )
+              for elem in v
+          ]
+          continue
+      if k == "prefixItems" and isinstance(v, list):
+        out[k] = [
+            self._slim_schema_node_impl(
+                elem,
+                is_root=False,
+                defs=scoped_defs,
+                visited=visited,
+                stats=stats,
+                ctx=ctx,
+            )
+            for elem in v
+        ]
         continue
       if k in ("anyOf", "oneOf", "allOf") and isinstance(v, list):
         non_null = [
@@ -367,19 +581,49 @@ class SchemaSlimmer:
             if not (isinstance(branch, dict) and branch.get("type") == "null")
         ]
         if len(non_null) == 1 and isinstance(non_null[0], dict):
-          merged = self.slim_schema_node(
-              non_null[0], is_root=False, defs=defs, visited=visited, stats=stats
+          merged = self._slim_schema_node_impl(
+              non_null[0],
+              is_root=False,
+              defs=scoped_defs,
+              visited=visited,
+              stats=stats,
+              ctx=ctx,
           )
           if isinstance(merged, dict):
             for mk, mv in merged.items():
               out.setdefault(mk, mv)
           continue
-        slimmed_branches = [
-            self.slim_schema_node(
-                branch, is_root=False, defs=defs, visited=visited, stats=stats
+        raw_slimmed_branches = [
+            self._slim_schema_node_impl(
+                branch,
+                is_root=False,
+                defs=scoped_defs,
+                visited=visited,
+                stats=stats,
+                ctx=ctx,
             )
             for branch in non_null
         ]
+        deduped_pairs: list[tuple[Any, Any]] = []
+        seen_sigs: set[str] = set()
+        for raw_b, slim_b in zip(non_null, raw_slimmed_branches):
+          sig = json.dumps(
+              slim_b, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+          )
+          if sig in seen_sigs:
+            if stats is not None:
+              stats.refs_deduped += 1
+            continue
+          seen_sigs.add(sig)
+          deduped_pairs.append((raw_b, slim_b))
+
+        if len(deduped_pairs) == 1 and isinstance(deduped_pairs[0][1], dict):
+          for mk, mv in deduped_pairs[0][1].items():
+            out.setdefault(mk, mv)
+          continue
+
+        non_null = [p[0] for p in deduped_pairs]
+        slimmed_branches = [p[1] for p in deduped_pairs]
         if (
             is_root
             and (k == "allOf" or not self.preserve_root_unions)
@@ -449,8 +693,13 @@ class SchemaSlimmer:
             slimmed_branches
             if slimmed_branches
             else [
-                self.slim_schema_node(
-                    branch, is_root=False, defs=defs, visited=visited, stats=stats
+                self._slim_schema_node_impl(
+                    branch,
+                    is_root=False,
+                    defs=scoped_defs,
+                    visited=visited,
+                    stats=stats,
+                    ctx=ctx,
                 )
                 for branch in v
             ]
@@ -1321,6 +1570,8 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
       "tokens_lazy": stats_lazy.schema_tokens_after,
       "lazy_reduction_pct": lazy_pct,
       "refs_inlined": stats_std.refs_inlined,
+      "refs_deduped": stats_std.refs_deduped,
+      "cycles_broken": stats_std.cycles_broken,
       "security_findings": security_findings,
       "findings": findings,
       "tools": per_tool,
@@ -1330,7 +1581,7 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "0.8.0",
+    version: str = "0.9.0",
 ) -> dict[str, Any]:
   """Formats an `audit_tools_manifest` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []

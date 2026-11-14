@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v0.8.0](https://img.shields.io/badge/version-v0.8.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v0.8.0)
+[![Version: v0.9.0](https://img.shields.io/badge/version-v0.9.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v0.9.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.8.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v0.9.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -53,11 +53,12 @@ flowchart LR
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
 | **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
 | **Wildcard Glob & `--read-only` Policy (`ToolAnnotations`)** | No | Exact names | No | No | **Yes (`--allow-tools`, `--deny-tools`, `--read-only`)** |
-| **`$defs`/`$ref` Inlining & Gemini/Vertex Dialect Normalization** | No | No | No | No | **Yes (Inlines `$ref`, flattens `anyOf`/`["T","null"]`, union guards)** |
+| **Recursive `$defs`/`$ref` Inlining, Cycle Breaking & DAG Dedup** | No | No | No | No | **Yes (RFC 6901 pointers, cycle stubs, union dedup)** |
 | **`tools/call`, `resources/read` & `prompts/get` Compaction** | No | No | No | No | **Yes (-43%+ output tokens, preserves stack-trace head & tail)** |
 | **Semantic Read-Only TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (`readOnlyHint`/`destructiveHint` aware)** |
 | **Pre-Truncation Tool-Poisoning, Unicode Smuggling & Secret Shield** | No | No | No | No | **Yes (15 rules + BiDi/Tag stripping + `--vault-handles`)** |
-| **Persistent Token & API Cost Telemetry (`mcp-slim stats`)** | No | No | No | No | **Yes (Per-server ledger + model USD savings)** |
+| **Bidirectional `sampling/createMessage` Guard (`--block-sampling`)** | No | No | No | No | **Yes (Blocks sampling exfiltration & scrubs handles)** |
+| **Persistent Cost Ledger & OpenTelemetry JSONL Spans (`--otel-jsonl`)** | No | No | No | No | **Yes (`mcp-slim stats` + W3C/OTLP NDJSON spans)** |
 | **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`audit --sarif --fail-on-security` & `SalyyS1/mcp-slim@main`)** |
 
 ---
@@ -239,7 +240,7 @@ jobs:
 ## Architecture & Optimization Passes
 
 ### 1. `SchemaSlimmer` (`tools/list`)
-- **Recursive `$defs` / `$ref` Inlining:** Resolves local `#/$defs/...` and `#/definitions/...` JSON pointers inline and removes `$defs` blocks so Pydantic/FastMCP servers work without `400 Invalid Argument` errors on Google Gemini, Vertex AI, and Azure OpenAI.
+- **Recursive `$defs` / `$ref` Inlining, Cycle Breaking & DAG Memoization:** Resolves nested RFC 6901 JSON pointers (`#/$defs/...`, `#/definitions/...`, `#/properties/...`, including `~0`/`~1` escapes, tuple `prefixItems`, and map `additionalProperties`), breaks direct and mutual `$ref` cycles cleanly without memo contamination, deduplicates identical union branches, and removes `$defs` blocks so Pydantic/FastMCP servers work without `400 Invalid Argument` errors on Google Gemini, Vertex AI, and Azure OpenAI.
 - **Metadata Stripping:** Removes `$schema`, `$id`, `title`, `additionalProperties`, `examples`, and `default` fields that do not affect LLM tool invocation accuracy.
 - **Nullable & Root-Union Normalization with Pre-Flight Branch Validation:** Rewrites `{"anyOf": [{"type": "string"}, {"type": "null"}]}` into `{"type": "string"}`, flattens root object `anyOf`/`oneOf` unions for strict providers while preserving compact disjunction hints (`[Requires one of: id | slug]`), and validates `tools/call` arguments against original `anyOf`/`oneOf` branch contracts at the proxy boundary (`--preserve-root-unions` keeps raw unions intact).
 - **Redundant Description Pruning:** Drops parameter descriptions that merely restate the parameter identifier (`repo_path`: `"The path to the Git repository."`).
@@ -265,6 +266,8 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 Scans `tools/list` schemas *before* description truncation as well as outgoing `tools/call` arguments and incoming `tools/call`, `resources/read`, and `prompts/get` payloads across 15 credential and injection rules (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, idempotent URI/query/env framed secrets, and `<IMPORTANT>`/`<SYSTEM>`/`<INSTRUCTION>` tool-poisoning directives).
 - **Unicode Tag & BiDi Smuggling Neutralization:** Strips invisible Unicode Tag characters (`U+E0000..U+E007F`) and bidirectional override/isolate controls (`U+202A..U+202E`, `U+2066..U+2069`) prior to injection matching so split tags (`<IMP\U000e0041ORTANT>`) or padded suffixes cannot evade truncation or regex triggers.
 - **Session-Scoped Opaque Handles (`--vault-handles`):** Tokenizes intercepted secrets in server outputs into HMAC-keyed session handles (`[SECRET_REF:github_token:...]`) stored only in proxy memory so raw credentials never enter the LLM context window, while recursively resolving handles back to raw values across nested `tools/call` arguments on outbound calls.
+- **Bidirectional `sampling/createMessage` Guard & `--block-sampling`:** Compacts and sanitizes server-initiated `sampling/createMessage`, `elicitation/create`, and `notifications/message` payloads before they reach the host LLM, scrubs raw credentials and `[SECRET_REF:...]` handles from outbound sampling completions so compromised servers cannot exfiltrate workspace secrets, and supports strict `--block-sampling` (`mcp-slim wrap --block-sampling`) to reject server-initiated LLM sampling locally with a JSON-RPC `-32600` policy error.
+- **Structured OpenTelemetry JSONL Spans (`--otel-jsonl` / `MCP_SLIM_OTEL_JSONL`):** Appends W3C/OTLP-aligned NDJSON trace spans (`trace_id`, `span_id`, `duration_ms`, token savings, inlined `$ref` counts, cache hits, policy blocks, and redaction counts, with zero raw secret exposure) for OpenTelemetry Filelog collectors, Grafana Tempo, Langfuse, and `jq` analysis.
 
 ### 5. Standalone MCP Server Mode (`mcp-slim serve`)
 In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.

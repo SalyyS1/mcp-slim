@@ -215,7 +215,7 @@ class SecretGuard:
     self._handle_to_secret[handle] = raw_secret
     return handle
 
-  def redact_text(self, text: str) -> str:
+  def redact_text(self, text: str, *, force_redact: bool = False) -> str:
     if not self.enabled or not text:
       return text
     current = text
@@ -223,10 +223,17 @@ class SecretGuard:
       current, smug_count = _UNICODE_SMUGGLING_RE.subn("", current)
       if smug_count:
         self.report.record("unicode_smuggling", smug_count)
+    if force_redact and "[SECRET_REF:" in current:
+      current, handle_count = _SECRET_HANDLE_PATTERN.subn(
+          "[REDACTED:SECRET_HANDLE]", current
+      )
+      if handle_count:
+        self.report.record("secret_handle", handle_count)
+    use_vault = self.vault_handles and not force_redact
     for name, triggers, pattern, replacement in _SECRET_RULES:
       if not any(t in current for t in triggers):
         continue
-      if self.vault_handles and name != "prompt_injection":
+      if use_vault and name != "prompt_injection":
         if name in _FRAMED_SECRET_CATEGORIES:
 
           def _replace_framed(match: re.Match[str], cat: str = name) -> str:
@@ -253,15 +260,18 @@ class SecretGuard:
           self.report.record(name, count)
     return current
 
-  def redact_value(self, value: Any) -> Any:
+  def redact_value(self, value: Any, *, force_redact: bool = False) -> Any:
     if not self.enabled:
       return value
     if isinstance(value, str):
-      return self.redact_text(value)
+      return self.redact_text(value, force_redact=force_redact)
     if isinstance(value, list):
-      return [self.redact_value(item) for item in value]
+      return [self.redact_value(item, force_redact=force_redact) for item in value]
     if isinstance(value, dict):
-      return {k: self.redact_value(v) for k, v in value.items()}
+      return {
+          k: self.redact_value(v, force_redact=force_redact)
+          for k, v in value.items()
+      }
     return value
 
   def resolve_handles_in_text(self, text: str) -> str:

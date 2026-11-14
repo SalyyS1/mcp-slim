@@ -7,10 +7,13 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import secrets
 import shlex
 import tempfile
+import time
 from typing import Any
 
+from . import __version__
 from .slimmer import SlimStats
 
 COUNTER_KEYS: tuple[str, ...] = (
@@ -22,6 +25,9 @@ COUNTER_KEYS: tuple[str, ...] = (
     "wire_bytes_before",
     "wire_bytes_after",
     "refs_inlined",
+    "refs_deduped",
+    "cycles_broken",
+    "sampling_guarded",
     "coerced_arguments",
     "cache_hits",
     "blocked_calls",
@@ -415,6 +421,9 @@ class StatsLedger:
       wire_bytes_before: int = 0,
       wire_bytes_after: int = 0,
       refs_inlined: int = 0,
+      refs_deduped: int = 0,
+      cycles_broken: int = 0,
+      sampling_guarded: int = 0,
       coerced_arguments: int = 0,
       cache_hits: int = 0,
       blocked_calls: int = 0,
@@ -452,6 +461,16 @@ class StatsLedger:
           ),
           "refs_inlined": (
               (stats.refs_inlined if stats is not None else 0) + refs_inlined
+          ),
+          "refs_deduped": (
+              (stats.refs_deduped if stats is not None else 0) + refs_deduped
+          ),
+          "cycles_broken": (
+              (stats.cycles_broken if stats is not None else 0) + cycles_broken
+          ),
+          "sampling_guarded": (
+              (stats.sampling_guarded if stats is not None else 0)
+              + sampling_guarded
           ),
           "coerced_arguments": (
               (stats.args_coerced if stats is not None else 0)
@@ -620,7 +639,14 @@ class StatsLedger:
             f"  Stringified Args Coerced    : {info['coerced_arguments']:<10,}"
             f"  Secrets Redacted    : {info['secrets_redacted']:,}"
         ),
-        f"  Policy-Blocked Tool Calls   : {info['blocked_calls']:,}",
+        (
+            f"  Policy-Blocked Tool Calls   : {info['blocked_calls']:<10,}"
+            f"  Sampling Guarded    : {info['sampling_guarded']:,}"
+        ),
+        (
+            f"  Schema Refs Deduped         : {info['refs_deduped']:<10,}"
+            f"  Ref Cycles Broken   : {info['cycles_broken']:,}"
+        ),
         "=" * 78,
         (
             f"{'SERVER':<30} | {'SESSIONS':>8} | {'RAW TOK':>9} |"
@@ -657,3 +683,105 @@ class StatsLedger:
 
     lines.append("=" * 78)
     return "\n".join(lines)
+
+
+def default_otel_jsonl_path() -> Path | None:
+  """Returns the JSONL span export path from `MCP_SLIM_OTEL_JSONL` when configured."""
+  raw = os.environ.get("MCP_SLIM_OTEL_JSONL", "").strip()
+  if not raw:
+    return None
+  return Path(raw).expanduser()
+
+
+class OTelSpanExporter:
+  """Zero-dependency OpenTelemetry-compatible JSONL span exporter for MCP JSON-RPC traffic."""
+
+  def __init__(
+      self,
+      path: Path | str | None = None,
+      *,
+      service_name: str = "mcp-slim",
+      server_label: str = "unknown",
+      trace_id: str | None = None,
+  ) -> None:
+    resolved = (
+        Path(path).expanduser()
+        if path is not None and str(path).strip()
+        else default_otel_jsonl_path()
+    )
+    self.path: Path | None = resolved
+    self.enabled: bool = resolved is not None
+    self.service_name = service_name
+    self.server_label = server_label
+    self.trace_id = (
+        trace_id.lower()
+        if isinstance(trace_id, str) and len(trace_id) == 32
+        else secrets.token_hex(16)
+    )
+    self.session_span_id = secrets.token_hex(8)
+    self.spans_exported: int = 0
+
+  @staticmethod
+  def new_span_id() -> str:
+    return secrets.token_hex(8)
+
+  @staticmethod
+  def now_ns() -> int:
+    return time.time_ns()
+
+  def emit_span(
+      self,
+      *,
+      name: str,
+      kind: str = "CLIENT",
+      start_time_unix_nano: int | None = None,
+      end_time_unix_nano: int | None = None,
+      span_id: str | None = None,
+      parent_span_id: str | None = None,
+      is_error: bool = False,
+      error_message: str | None = None,
+      attributes: dict[str, Any] | None = None,
+  ) -> dict[str, Any] | None:
+    """Appends a single W3C/OTLP-aligned JSON span line without ever raising."""
+    if not self.enabled or self.path is None:
+      return None
+    end_ns = end_time_unix_nano if end_time_unix_nano is not None else time.time_ns()
+    start_ns = start_time_unix_nano if start_time_unix_nano is not None else end_ns
+    if end_ns < start_ns:
+      end_ns = start_ns
+    clean_attrs: dict[str, Any] = {}
+    if attributes:
+      for k, v in attributes.items():
+        if v is not None:
+          clean_attrs[k] = v
+
+    status_obj: dict[str, Any] = {"code": "ERROR" if is_error else "OK"}
+    if error_message:
+      status_obj["message"] = error_message
+
+    span: dict[str, Any] = {
+        "trace_id": self.trace_id,
+        "span_id": span_id or self.new_span_id(),
+        "parent_span_id": parent_span_id or self.session_span_id,
+        "name": name,
+        "kind": kind,
+        "start_time_unix_nano": start_ns,
+        "end_time_unix_nano": end_ns,
+        "duration_ms": round((end_ns - start_ns) / 1_000_000.0, 3),
+        "status": status_obj,
+        "resource": {
+            "service.name": self.service_name,
+            "service.version": __version__,
+            "mcp.server.label": self.server_label,
+        },
+        "attributes": clean_attrs,
+    }
+    try:
+      self.path.parent.mkdir(parents=True, exist_ok=True)
+      line = json.dumps(span, ensure_ascii=False, separators=(",", ":")) + "\n"
+      with self.path.open("a", encoding="utf-8") as fh:
+        fh.write(line)
+      self.spans_exported += 1
+      return span
+    except Exception:
+      return None

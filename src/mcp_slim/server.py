@@ -172,6 +172,8 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
               "tokens_after": stats.schema_tokens_after,
               "reduction_pct": stats.reduction_pct,
               "refs_inlined": stats.refs_inlined,
+              "refs_deduped": stats.refs_deduped,
+              "cycles_broken": stats.cycles_broken,
               "tools": compacted,
           }),
       }

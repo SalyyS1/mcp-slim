@@ -256,7 +256,7 @@ class TestMcpSlimV080(unittest.TestCase):
 
       sarif = json.loads(sarif_path.read_text(encoding="utf-8"))
       self.assertEqual(sarif["version"], "2.1.0")
-      self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], "0.8.0")
+      self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], "0.9.0")
       sarif_rules = {r["ruleId"] for r in sarif["runs"][0]["results"]}
       self.assertEqual(sarif_rules, {"MS001", "MS002", "MS003", "MS004"})
 
