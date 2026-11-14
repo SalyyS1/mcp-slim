@@ -32,6 +32,7 @@ COUNTER_KEYS: tuple[str, ...] = (
     "cache_hits",
     "blocked_calls",
     "rug_pulls_blocked",
+    "resources_blocked",
     "tables_compacted",
     "secrets_redacted",
 )
@@ -430,6 +431,7 @@ class StatsLedger:
       cache_hits: int = 0,
       blocked_calls: int = 0,
       rug_pulls_blocked: int = 0,
+      resources_blocked: int = 0,
       tables_compacted: int = 0,
   ) -> dict[str, Any]:
     """Records one proxy session into the cumulative ledger without ever raising."""
@@ -489,6 +491,10 @@ class StatsLedger:
           "rug_pulls_blocked": (
               (stats.rug_pulls_blocked if stats is not None else 0)
               + rug_pulls_blocked
+          ),
+          "resources_blocked": (
+              (stats.resources_blocked if stats is not None else 0)
+              + resources_blocked
           ),
           "tables_compacted": (
               (stats.tables_compacted if stats is not None else 0)
@@ -658,6 +664,10 @@ class StatsLedger:
         (
             f"  Schema Refs Deduped         : {info['refs_deduped']:<10,}"
             f"  Ref Cycles Broken   : {info['cycles_broken']:,}"
+        ),
+        (
+            f"  Rug-Pulls Quarantined       : {info['rug_pulls_blocked']:<10,}"
+            f"  Resources Blocked   : {info['resources_blocked']:,}"
         ),
         "=" * 78,
         (

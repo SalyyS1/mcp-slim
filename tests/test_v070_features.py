@@ -237,6 +237,7 @@ class TestMcpSlimV070(unittest.TestCase):
             "compact_mcp_tools",
             "audit_mcp_schema",
             "diff_mcp_tools",
+            "audit_mcp_resources",
             "redact_secrets",
             "get_slim_stats",
         },

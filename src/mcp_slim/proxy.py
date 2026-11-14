@@ -14,6 +14,7 @@ from .guard import SecretGuard
 from .slimmer import (
     LazyToolBroker,
     OutputSlimmer,
+    ResourceUriGuard,
     SchemaSlimmer,
     SlimStats,
     ToolPinGuard,
@@ -41,6 +42,9 @@ class MCPProxy:
       pin_schemas: bool = False,
       allow_new_tools: bool = False,
       pin_guard: ToolPinGuard | None = None,
+      allow_resource_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      deny_resource_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      resource_guard: ResourceUriGuard | None = None,
       otel_exporter: OTelSpanExporter | None = None,
       otel_jsonl_path: Path | str | None = None,
   ) -> None:
@@ -63,6 +67,15 @@ class MCPProxy:
         pin_guard
         if pin_guard is not None
         else ToolPinGuard(enabled=pin_schemas, allow_new_tools=allow_new_tools)
+    )
+    self.resource_guard = (
+        resource_guard
+        if resource_guard is not None
+        else ResourceUriGuard(
+            allow_prefixes=allow_resource_prefixes,
+            deny_prefixes=deny_resource_prefixes,
+            block_traversal=True,
+        )
     )
     self.stats_ledger = (
         stats_ledger
@@ -437,13 +450,48 @@ class MCPProxy:
         else:
           self._read_cache.clear()
 
+    if method in ("resources/read", "resources/subscribe") and isinstance(params, dict):
+      req_uri = params.get("uri")
+      uri_err = self.resource_guard.validate_uri(req_uri)
+      if uri_err is not None:
+        self.stats.blocked_calls += 1
+        self.stats.resources_blocked += 1
+        if msg_id is not None:
+          err_payload = {
+              "jsonrpc": msg.get("jsonrpc", "2.0"),
+              "id": msg_id,
+              "error": {"code": -32602, "message": uri_err},
+          }
+          self._local_responses.append(
+              json.dumps(err_payload, ensure_ascii=False, separators=(",", ":"))
+              + "\n"
+          )
+        elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+        self._emit_span(
+            name=f"mcp.{method}",
+            kind="CLIENT",
+            start_ns=start_wall_ns,
+            end_ns=start_wall_ns + elapsed_ns,
+            is_error=True,
+            error_message=uri_err,
+            attributes={
+                "mcp.method.name": method,
+                "mcp.resource.uri": str(req_uri) if req_uri is not None else "",
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": True,
+                "mcp_slim.resource_blocked": True,
+            },
+        )
+        return ""
+
     if msg_id is not None and isinstance(method, str):
       self._pending_methods[msg_id] = method
       if resolved_tool_name is not None:
         self._pending_tool_names[msg_id] = resolved_tool_name
 
     red_req_before = self.secret_guard.report.total_redactions
-    if method == "tools/call" and isinstance(params, dict):
+    if method in ("tools/call", "prompts/get") and isinstance(params, dict):
       if "arguments" in params:
         redacted_args = self.secret_guard.redact_value(params["arguments"])
         params["arguments"] = self.secret_guard.resolve_handles_in_value(
@@ -532,12 +580,19 @@ class MCPProxy:
           new_params = dict(srv_params)
           if isinstance(new_params.get("messages"), list):
             slim_msgs = self.output_slimmer.slim_prompt_result(
-                {"messages": new_params["messages"]}, stats=self.stats
+                {"messages": new_params["messages"]},
+                stats=self.stats,
+                guard=self.secret_guard,
+                force_redact=True,
             )
             new_params["messages"] = slim_msgs["messages"]
           if isinstance(new_params.get("systemPrompt"), str) and new_params["systemPrompt"]:
             sp_before = estimate_tokens(new_params["systemPrompt"])
-            slim_sp = self.output_slimmer.slim_text(new_params["systemPrompt"])
+            slim_sp = self.output_slimmer.slim_text(
+                new_params["systemPrompt"],
+                guard=self.secret_guard,
+                force_redact=True,
+            )
             sp_after = estimate_tokens(slim_sp)
             self.stats.output_tokens_before += sp_before
             self.stats.output_tokens_after += sp_after
@@ -638,11 +693,41 @@ class MCPProxy:
             result["tools"] = slimmed_list
           self.stats.schema_tokens_before += orig_tok - sanitized_tok
       elif method == "tools/call" or isinstance(result.get("content"), list):
-        result = self.output_slimmer.slim_call_result(result, stats=self.stats)
+        result = self.output_slimmer.slim_call_result(
+            result, stats=self.stats, guard=self.secret_guard
+        )
       elif method == "resources/read" or isinstance(result.get("contents"), list):
-        result = self.output_slimmer.slim_resource_result(result, stats=self.stats)
+        result = self.output_slimmer.slim_resource_result(
+            result, stats=self.stats, guard=self.secret_guard
+        )
       elif method == "prompts/get" or isinstance(result.get("messages"), list):
-        result = self.output_slimmer.slim_prompt_result(result, stats=self.stats)
+        result = self.output_slimmer.slim_prompt_result(
+            result, stats=self.stats, guard=self.secret_guard
+        )
+      elif method == "resources/list" or isinstance(result.get("resources"), list):
+        raw_res = result.get("resources")
+        if isinstance(raw_res, list):
+          res_before_tok = estimate_tokens(raw_res)
+          sanitized_res = self.secret_guard.redact_value(raw_res)
+          filtered_res = self.resource_guard.filter_resources_list(
+              sanitized_res, stats=self.stats
+          )
+          result = {**result, "resources": filtered_res}
+          self.stats.schema_tokens_before += res_before_tok
+          self.stats.schema_tokens_after += estimate_tokens(filtered_res)
+      elif method == "resources/templates/list" or isinstance(
+          result.get("resourceTemplates"), list
+      ):
+        raw_tmpls = result.get("resourceTemplates")
+        if isinstance(raw_tmpls, list):
+          tmpl_before_tok = estimate_tokens(raw_tmpls)
+          sanitized_tmpls = self.secret_guard.redact_value(raw_tmpls)
+          filtered_tmpls = self.resource_guard.filter_resource_templates(
+              sanitized_tmpls, stats=self.stats
+          )
+          result = {**result, "resourceTemplates": filtered_tmpls}
+          self.stats.schema_tokens_before += tmpl_before_tok
+          self.stats.schema_tokens_after += estimate_tokens(filtered_tmpls)
       result = self.secret_guard.redact_value(result)
       msg["result"] = result
       serialized = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))

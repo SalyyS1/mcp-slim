@@ -1,7 +1,7 @@
 {
   "name": "mcp-slim",
-  "version": "1.0.0",
-  "description": "Zero-dependency MCP JSON-RPC 2.0 stdio proxy for context token compression (-48.8% to -98.7%), $defs/$ref inlining, rug-pull schema pinning, session-scoped secret vault handles, and OpenTelemetry spans.",
+  "version": "1.1.0",
+  "description": "Zero-dependency MCP JSON-RPC 2.0 stdio proxy for context token compression (-48.8% to -98.7%), $defs/$ref inlining, rug-pull schema pinning, resource URI allowlists, session-scoped secret vault handles, and OpenTelemetry spans.",
   "license": "MIT",
   "author": "SalyyS1",
   "homepage": "https://salyys1.github.io/mcp-slim/",

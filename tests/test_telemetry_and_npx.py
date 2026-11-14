@@ -78,7 +78,7 @@ class TestServerLabelDerivation(unittest.TestCase):
 
 class TestStatsLedgerAndCLI(unittest.TestCase):
   def test_version_bumped_to_0_9_0(self) -> None:
-    self.assertEqual(mcp_slim.__version__, "1.0.0")
+    self.assertEqual(mcp_slim.__version__, "1.1.0")
 
   def test_ledger_accumulation_and_per_server_breakdown(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -312,7 +312,7 @@ class TestNodeLauncherActionAndPlayground(unittest.TestCase):
 
     pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
     self.assertEqual(pkg["name"], "mcp-slim")
-    self.assertEqual(pkg["version"], "1.0.0")
+    self.assertEqual(pkg["version"], "1.1.0")
     self.assertEqual(pkg["bin"]["mcp-slim"], "bin/mcp-slim.js")
     self.assertFalse(pkg.get("dependencies"))
 
@@ -337,7 +337,7 @@ class TestNodeLauncherActionAndPlayground(unittest.TestCase):
         capture_output=True,
         check=True,
     )
-    self.assertIn("mcp-slim 1.0.0", ver_res.stdout)
+    self.assertIn("mcp-slim 1.1.0", ver_res.stdout)
 
   def test_wrap_config_runners_npx_and_uvx_idempotent(self) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:

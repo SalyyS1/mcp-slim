@@ -167,6 +167,7 @@ class SlimStats:
   args_coerced: int = 0
   blocked_calls: int = 0
   rug_pulls_blocked: int = 0
+  resources_blocked: int = 0
   tables_compacted: int = 0
 
   @property
@@ -1324,7 +1325,14 @@ class OutputSlimmer:
 
     return serialized
 
-  def slim_text(self, text: str, stats: SlimStats | None = None) -> str:
+  def slim_text(
+      self,
+      text: str,
+      stats: SlimStats | None = None,
+      guard: Any | None = None,
+      *,
+      force_redact: bool = False,
+  ) -> str:
     if not text:
       return text
     cleaned = _LONE_SURROGATE.sub("\ufffd", _ANSI_ESCAPE.sub("", text))
@@ -1332,6 +1340,8 @@ class OutputSlimmer:
     if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
       try:
         parsed = json.loads(stripped)
+        if guard is not None:
+          parsed = guard.redact_value(parsed, force_redact=force_redact)
         compacted = self.compact_json_value(parsed, stats=stats)
         return self._fit_json_within_budget(compacted)
       except (json.JSONDecodeError, TypeError):
@@ -1344,10 +1354,12 @@ class OutputSlimmer:
           ln.startswith("{") and ln.endswith("}") for ln in raw_lines
       ):
         try:
-          jsonl_items = [
-              self.compact_json_value(json.loads(ln))
-              for ln in raw_lines[: self.max_list_items]
-          ]
+          jsonl_items = []
+          for ln in raw_lines[: self.max_list_items]:
+            obj = json.loads(ln)
+            if guard is not None:
+              obj = guard.redact_value(obj, force_redact=force_redact)
+            jsonl_items.append(self.compact_json_value(obj))
           out_lines = [
               json.dumps(item, ensure_ascii=False, separators=(",", ":"))
               for item in jsonl_items
@@ -1358,30 +1370,59 @@ class OutputSlimmer:
                 " truncated by mcp-slim)"
             )
           cleaned = "\n".join(out_lines)
+          return (
+              cleaned[: self.max_string_chars]
+              + f"\n... [truncated {len(cleaned) - self.max_string_chars} chars by mcp-slim]"
+              if len(cleaned) > self.max_string_chars
+              else cleaned
+          )
         except (json.JSONDecodeError, TypeError):
           pass
+    if guard is not None:
+      cleaned = guard.redact_text(cleaned, force_redact=force_redact)
     cleaned = re.sub(r"\|[\s:-]*-{3,}[\s:-]*(?=\|)", "|---", cleaned)
     cleaned = re.sub(r"\|\s+([^|\n]+?)\s+(?=\|)", r"|\1", cleaned)
     cleaned = _BLANK_LINES.sub("\n\n", cleaned)
     if len(cleaned) > self.max_string_chars:
-      omitted = len(cleaned) - self.max_string_chars
+      marker_spans = [
+          (m.start(), m.end())
+          for m in re.finditer(r"\[(?:SECRET_REF|REDACTED):[^\]]+\]", cleaned)
+      ]
       if "\n" in cleaned and self.max_string_chars >= 120:
-        head_budget = int(self.max_string_chars * 0.6)
-        tail_budget = self.max_string_chars - head_budget
+        head_end = int(self.max_string_chars * 0.6)
+        tail_start = len(cleaned) - (self.max_string_chars - head_end)
+        for ms, me in marker_spans:
+          if ms < head_end < me:
+            head_end = me
+          if ms < tail_start < me:
+            tail_start = max(head_end, ms)
+        if tail_start <= head_end:
+          return cleaned
+        omitted = tail_start - head_end
         cleaned = (
-            cleaned[:head_budget]
+            cleaned[:head_end]
             + f"\n... [truncated {omitted} chars by mcp-slim] ...\n"
-            + cleaned[-tail_budget:]
+            + cleaned[tail_start:]
         )
       else:
+        head_end = self.max_string_chars
+        for ms, me in marker_spans:
+          if ms < head_end < me:
+            head_end = me
+        if head_end >= len(cleaned):
+          return cleaned
+        omitted = len(cleaned) - head_end
         cleaned = (
-            cleaned[: self.max_string_chars]
+            cleaned[:head_end]
             + f"\n... [truncated {omitted} chars by mcp-slim]"
         )
     return cleaned
 
   def slim_call_result(
-      self, result: dict[str, Any], stats: SlimStats | None = None
+      self,
+      result: dict[str, Any],
+      stats: SlimStats | None = None,
+      guard: Any | None = None,
   ) -> dict[str, Any]:
     before_tokens = estimate_tokens(result) if stats is not None else 0
     out = dict(result)
@@ -1392,28 +1433,40 @@ class OutputSlimmer:
         if isinstance(item, dict) and item.get("type") == "text":
           text = item.get("text")
           if isinstance(text, str):
-            item = {**item, "text": self.slim_text(text, stats=stats)}
+            item = {
+                **item,
+                "text": self.slim_text(text, stats=stats, guard=guard),
+            }
         elif (
             isinstance(item, dict)
             and item.get("type") == "resource"
             and isinstance(item.get("resource"), dict)
         ):
           res = item["resource"]
+          if guard is not None and isinstance(res.get("blob"), str):
+            res = guard.redact_value(res)
           res_text = res.get("text")
           if isinstance(res_text, str):
-            slimmed_res = self.slim_text(res_text, stats=stats)
+            slimmed_res = self.slim_text(res_text, stats=stats, guard=guard)
             if self.flatten_resources:
               uri = res.get("uri")
               header = f"[Resource: {uri}]\n" if isinstance(uri, str) and uri else ""
               item = {"type": "text", "text": f"{header}{slimmed_res}"}
             else:
               item = {**item, "resource": {**res, "text": slimmed_res}}
+          elif res is not item["resource"]:
+            item = {**item, "resource": res}
         new_content.append(item)
       out["content"] = new_content
     if "structuredContent" in out and isinstance(
         out["structuredContent"], (dict, list)
     ):
-      compacted_sc = self.compact_json_value(out["structuredContent"], stats=stats)
+      sc_val = (
+          guard.redact_value(out["structuredContent"])
+          if guard is not None
+          else out["structuredContent"]
+      )
+      compacted_sc = self.compact_json_value(sc_val, stats=stats)
       if compacted_sc in (None, {}, []):
         out.pop("structuredContent", None)
       else:
@@ -1425,17 +1478,28 @@ class OutputSlimmer:
     return out
 
   def slim_resource_result(
-      self, result: dict[str, Any], stats: SlimStats | None = None
+      self,
+      result: dict[str, Any],
+      stats: SlimStats | None = None,
+      guard: Any | None = None,
   ) -> dict[str, Any]:
-    """Compacts MCP `resources/read` payloads (`result.contents[*].text`)."""
+    """Compacts MCP `resources/read` payloads (`result.contents[*].text` and UTF-8 `blob`)."""
     contents = result.get("contents")
     if not isinstance(contents, list):
       return result
     before_tokens = estimate_tokens(result) if stats is not None else 0
     new_contents: list[Any] = []
     for item in contents:
-      if isinstance(item, dict) and isinstance(item.get("text"), str):
-        item = {**item, "text": self.slim_text(item["text"])}
+      if isinstance(item, dict):
+        cur = dict(item)
+        if guard is not None and isinstance(cur.get("blob"), str):
+          cur["blob"] = guard.redact_base64_blob(
+              cur["blob"],
+              mime_type=cur.get("mimeType") if isinstance(cur.get("mimeType"), str) else None,
+          )
+        if isinstance(cur.get("text"), str):
+          cur["text"] = self.slim_text(cur["text"], stats=stats, guard=guard)
+        item = cur
       new_contents.append(item)
     out = {**result, "contents": new_contents}
     if stats is not None:
@@ -1443,8 +1507,46 @@ class OutputSlimmer:
       stats.output_tokens_after += estimate_tokens(out)
     return out
 
+  def _slim_prompt_part(
+      self,
+      part: Any,
+      stats: SlimStats | None = None,
+      guard: Any | None = None,
+      *,
+      force_redact: bool = False,
+  ) -> Any:
+    if not isinstance(part, dict):
+      return part
+    ptype = part.get("type")
+    if ptype == "text" and isinstance(part.get("text"), str):
+      return {
+          **part,
+          "text": self.slim_text(
+              part["text"], stats=stats, guard=guard, force_redact=force_redact
+          ),
+      }
+    if ptype == "resource" and isinstance(part.get("resource"), dict):
+      res = dict(part["resource"])
+      if guard is not None and isinstance(res.get("blob"), str):
+        res["blob"] = guard.redact_base64_blob(
+            res["blob"],
+            mime_type=res.get("mimeType") if isinstance(res.get("mimeType"), str) else None,
+            force_redact=force_redact,
+        )
+      if isinstance(res.get("text"), str):
+        res["text"] = self.slim_text(
+            res["text"], stats=stats, guard=guard, force_redact=force_redact
+        )
+      return {**part, "resource": res}
+    return part
+
   def slim_prompt_result(
-      self, result: dict[str, Any], stats: SlimStats | None = None
+      self,
+      result: dict[str, Any],
+      stats: SlimStats | None = None,
+      guard: Any | None = None,
+      *,
+      force_redact: bool = False,
   ) -> dict[str, Any]:
     """Compacts MCP `prompts/get` payloads (`result.messages[*].content`)."""
     messages = result.get("messages")
@@ -1457,26 +1559,23 @@ class OutputSlimmer:
         new_messages.append(msg)
         continue
       content = msg.get("content")
-      if (
-          isinstance(content, dict)
-          and content.get("type") == "text"
-          and isinstance(content.get("text"), str)
-      ):
+      if isinstance(content, dict):
         msg = {
             **msg,
-            "content": {**content, "text": self.slim_text(content["text"])},
+            "content": self._slim_prompt_part(
+                content, stats=stats, guard=guard, force_redact=force_redact
+            ),
         }
       elif isinstance(content, list):
-        slimmed_parts: list[Any] = []
-        for part in content:
-          if (
-              isinstance(part, dict)
-              and part.get("type") == "text"
-              and isinstance(part.get("text"), str)
-          ):
-            part = {**part, "text": self.slim_text(part["text"])}
-          slimmed_parts.append(part)
-        msg = {**msg, "content": slimmed_parts}
+        msg = {
+            **msg,
+            "content": [
+                self._slim_prompt_part(
+                    p, stats=stats, guard=guard, force_redact=force_redact
+                )
+                for p in content
+            ],
+        }
       new_messages.append(msg)
     out = {**result, "messages": new_messages}
     if stats is not None:
@@ -1523,6 +1622,14 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "name": "ToolRugPullMutation",
         "shortDescription": {
             "text": "MCP tool definition mutated description, inputSchema, or safety annotations relative to pinned baseline."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "MS006",
+        "name": "UnsafeOrPoisonedResource",
+        "shortDescription": {
+            "text": "MCP resource violates URI prefix policy, contains path traversal, or embeds secrets/prompt injection."
         },
         "defaultConfiguration": {"level": "error"},
     },
@@ -1865,11 +1972,16 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
     tool_guard = SecretGuard(enabled=True)
     tool_guard.redact_value(raw_t)
     cats = dict(tool_guard.report.by_category)
-    poison_count = cats.get("prompt_injection", 0) + cats.get("unicode_smuggling", 0)
+    poison_count = (
+        cats.get("prompt_injection", 0)
+        + cats.get("unicode_smuggling", 0)
+        + cats.get("markdown_exfil_beacon", 0)
+    )
     secret_cats = {
         k: v
         for k, v in cats.items()
-        if k not in ("prompt_injection", "unicode_smuggling") and v > 0
+        if k not in ("prompt_injection", "unicode_smuggling", "markdown_exfil_beacon")
+        and v > 0
     }
 
     if poison_count > 0:
@@ -1958,14 +2070,306 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
   }
 
 
+def _unquote_iterative(value: str, max_passes: int = 3) -> str:
+  cur = value
+  for _ in range(max_passes):
+    nxt = urllib.parse.unquote(cur)
+    if nxt == cur:
+      break
+    cur = nxt
+  return cur
+
+
+def canonicalize_resource_uri(uri: str) -> tuple[str, str | None]:
+  """Canonicalizes an MCP resource URI and detects null-byte or `..` path traversal.
+
+  Returns `(canonical_uri, violation_reason_or_None)`.
+  """
+  if not isinstance(uri, str) or not uri.strip():
+    return ("", "Empty or non-string resource URI")
+  stripped = uri.strip()
+  decoded_full = _unquote_iterative(stripped)
+  if "\x00" in stripped or "\x00" in decoded_full or any(ord(ch) < 32 for ch in stripped):
+    return (stripped, "Null-byte or control-character smuggling in resource URI")
+
+  parts = urllib.parse.urlsplit(stripped)
+  scheme = parts.scheme.lower()
+  netloc = parts.netloc.lower()
+  dec_path = _unquote_iterative(parts.path).replace("\\", "/")
+
+  segments = dec_path.split("/")
+  has_dotdot = any(seg == ".." for seg in segments)
+  norm_segs: list[str] = []
+  escaped_root = False
+  for seg in segments:
+    if seg in ("", "."):
+      continue
+    if seg == "..":
+      if not norm_segs:
+        escaped_root = True
+      else:
+        norm_segs.pop()
+      continue
+    norm_segs.append(seg)
+
+  if dec_path.startswith("/"):
+    canon_path = "/" + "/".join(norm_segs)
+    if dec_path.endswith("/") and canon_path != "/" and not has_dotdot:
+      canon_path += "/"
+  else:
+    canon_path = "/".join(norm_segs)
+    if dec_path.endswith("/") and canon_path and not has_dotdot:
+      canon_path += "/"
+
+  canon_uri = urllib.parse.urlunsplit((scheme, netloc, canon_path, parts.query, ""))
+  if has_dotdot or escaped_root:
+    return (
+        canon_uri,
+        f"Path traversal segment ('..') detected in resource URI '{stripped}'",
+    )
+  return (canon_uri, None)
+
+
+def _normalize_uri_prefix(prefix: str) -> str:
+  stripped = prefix.strip()
+  if not stripped:
+    return ""
+  if any(w in stripped for w in ("*", "?", "[")):
+    if "://" in stripped:
+      sch, rest = stripped.split("://", 1)
+      if "/" in rest:
+        host, tail = rest.split("/", 1)
+        return f"{sch.lower()}://{host.lower()}/{tail}"
+      return f"{sch.lower()}://{rest.lower()}"
+    if ":" in stripped:
+      sch, rest = stripped.split(":", 1)
+      return f"{sch.lower()}:{rest}"
+    return stripped
+  if stripped.endswith("://"):
+    return stripped[:-3].lower() + "://"
+  if stripped.endswith(":") and "/" not in stripped:
+    return stripped.lower()
+  canon, _ = canonicalize_resource_uri(stripped)
+  return canon or stripped
+
+
+def _uri_matches_prefix(canon_uri: str, norm_prefix: str) -> bool:
+  """Matches a canonical URI against a prefix or glob without sibling-directory confusion."""
+  if not norm_prefix:
+    return False
+  if any(w in norm_prefix for w in ("*", "?", "[")):
+    return fnmatch.fnmatchcase(canon_uri, norm_prefix)
+  if norm_prefix.endswith((":", "://")):
+    return canon_uri.startswith(norm_prefix)
+  if norm_prefix.endswith("/"):
+    if canon_uri.startswith(norm_prefix):
+      return True
+    trimmed = norm_prefix[:-1]
+    if trimmed and not trimmed.endswith(":/"):
+      return canon_uri == trimmed
+    return False
+  return canon_uri == norm_prefix or canon_uri.startswith(norm_prefix + "/")
+
+
+class ResourceUriGuard:
+  """Enforces URI prefix allowlists/denylists and traversal guards on MCP resources (`--allow-resource-prefixes`)."""
+
+  def __init__(
+      self,
+      allow_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      deny_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      block_traversal: bool = True,
+  ) -> None:
+    self.allow_prefixes: tuple[str, ...] | None = (
+        tuple(
+            p
+            for p in (_normalize_uri_prefix(x) for x in sorted(set(allow_prefixes)))
+            if p
+        )
+        if allow_prefixes is not None
+        else None
+    )
+    self.deny_prefixes: tuple[str, ...] = (
+        tuple(
+            p
+            for p in (_normalize_uri_prefix(x) for x in sorted(set(deny_prefixes)))
+            if p
+        )
+        if deny_prefixes
+        else ()
+    )
+    self.block_traversal = block_traversal
+
+  @property
+  def has_prefix_policy(self) -> bool:
+    return self.allow_prefixes is not None or bool(self.deny_prefixes)
+
+  def validate_uri(self, uri: Any) -> str | None:
+    """Returns `None` when `uri` is permitted, or an actionable error message when blocked."""
+    canon_uri, trav_err = canonicalize_resource_uri(uri if isinstance(uri, str) else "")
+    if trav_err is not None:
+      if self.block_traversal or not canon_uri:
+        return f"[mcp-slim] Resource access blocked: {trav_err}."
+    if self.deny_prefixes and any(
+        _uri_matches_prefix(canon_uri, dp) for dp in self.deny_prefixes
+    ):
+      return (
+          f"[mcp-slim] Resource URI '{uri}' is blocked by "
+          "--deny-resource-prefixes policy."
+      )
+    if self.allow_prefixes is not None:
+      if not self.allow_prefixes or not any(
+          _uri_matches_prefix(canon_uri, ap) for ap in self.allow_prefixes
+      ):
+        return (
+            f"[mcp-slim] Resource URI '{uri}' is outside allowed prefixes "
+            "(--allow-resource-prefixes)."
+        )
+    return None
+
+  def is_uri_allowed(self, uri: Any) -> bool:
+    return self.validate_uri(uri) is None
+
+  def is_template_allowed(self, uri_template: Any) -> bool:
+    """Checks an RFC 6570 `uriTemplate` static prefix against configured allow/deny rules."""
+    if not isinstance(uri_template, str) or not uri_template.strip():
+      return False
+    static_head = uri_template.strip().split("{", 1)[0]
+    if not static_head:
+      return self.allow_prefixes is None
+    canon_head, trav_err = canonicalize_resource_uri(static_head)
+    if trav_err is not None and self.block_traversal:
+      return False
+    if self.deny_prefixes and any(
+        _uri_matches_prefix(canon_head, dp) for dp in self.deny_prefixes
+    ):
+      return False
+    if self.allow_prefixes is not None:
+      return any(_uri_matches_prefix(canon_head, ap) for ap in self.allow_prefixes)
+    return True
+
+  def filter_resources_list(
+      self, resources: list[dict[str, Any]], stats: SlimStats | None = None
+  ) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    for res in resources:
+      if not isinstance(res, dict):
+        continue
+      uri = res.get("uri")
+      if self.validate_uri(uri) is not None:
+        if stats is not None:
+          stats.resources_blocked += 1
+        continue
+      out_res = dict(res)
+      if isinstance(out_res.get("description"), str) and out_res["description"].strip():
+        out_res["description"] = compact_description(out_res["description"], max_chars=120)
+      kept.append(out_res)
+    return kept
+
+  def filter_resource_templates(
+      self, templates: list[dict[str, Any]], stats: SlimStats | None = None
+  ) -> list[dict[str, Any]]:
+    kept: list[dict[str, Any]] = []
+    for tmpl in templates:
+      if not isinstance(tmpl, dict):
+        continue
+      uri_tmpl = tmpl.get("uriTemplate")
+      if not self.is_template_allowed(uri_tmpl):
+        if stats is not None:
+          stats.resources_blocked += 1
+        continue
+      out_tmpl = dict(tmpl)
+      if isinstance(out_tmpl.get("description"), str) and out_tmpl["description"].strip():
+        out_tmpl["description"] = compact_description(out_tmpl["description"], max_chars=120)
+      kept.append(out_tmpl)
+    return kept
+
+
+def audit_resources_manifest(
+    resources: list[dict[str, Any]],
+    *,
+    allow_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+    deny_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
+  """Audits MCP `resources/list` or `resources/read` entries for URI traversal, policy violations, secrets, and indirect prompt injection."""
+  from .guard import SecretGuard
+
+  uri_guard = ResourceUriGuard(
+      allow_prefixes=allow_prefixes,
+      deny_prefixes=deny_prefixes,
+      block_traversal=True,
+  )
+  findings: list[dict[str, Any]] = []
+  per_resource: list[dict[str, Any]] = []
+
+  for idx, item in enumerate(resources):
+    if not isinstance(item, dict):
+      continue
+    uri = str(item.get("uri") or item.get("uriTemplate") or f"resource_{idx}")
+    uri_err = (
+        uri_guard.validate_uri(item["uri"])
+        if isinstance(item.get("uri"), str)
+        else (
+            None
+            if isinstance(item.get("uriTemplate"), str)
+            and uri_guard.is_template_allowed(item["uriTemplate"])
+            else f"[mcp-slim] Resource template '{uri}' violates URI policy."
+        )
+    )
+    sec_guard = SecretGuard(enabled=True)
+    sec_guard.redact_value(item)
+    cats = dict(sec_guard.report.by_category)
+
+    if uri_err is not None:
+      findings.append({
+          "rule_id": "MS006",
+          "level": "error",
+          "tool": uri,
+          "kind": "uri_policy_violation",
+          "message": uri_err,
+      })
+    if cats:
+      cats_str = ", ".join(sorted(f"{k}:{v}" for k, v in cats.items()))
+      findings.append({
+          "rule_id": "MS006",
+          "level": "error",
+          "tool": uri,
+          "kind": "resource_poison_or_secret",
+          "message": (
+              f"Resource '{uri}' contains secret material or indirect prompt "
+              f"injection ({cats_str})."
+          ),
+      })
+
+    per_resource.append({
+        "uri": uri,
+        "allowed": uri_err is None,
+        "uri_error": uri_err,
+        "security_categories": cats,
+    })
+
+  return {
+      "resource_count": len(per_resource),
+      "blocked_uris": sum(1 for r in per_resource if not r["allowed"]),
+      "poisoned_or_secret_resources": sum(
+          1 for r in per_resource if r["security_categories"]
+      ),
+      "security_findings": len(findings),
+      "findings": findings,
+      "resources": per_resource,
+  }
+
+
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.0.0",
+    version: str = "1.1.0",
 ) -> dict[str, Any]:
-  """Formats an `audit_tools_manifest` report as OASIS SARIF v2.1.0."""
+  """Formats an `audit_tools_manifest`, `diff_tools_manifests`, or `audit_resources_manifest` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []
   for f in report.get("findings", []):
+    loc_name = str(f.get("tool") or f.get("uri") or "mcp")
+    loc_kind = "resource" if f.get("rule_id") == "MS006" else "function"
     results.append({
         "ruleId": f["rule_id"],
         "level": f["level"],
@@ -1977,8 +2381,8 @@ def build_audit_sarif(
                 },
                 "logicalLocations": [
                     {
-                        "name": f["tool"],
-                        "kind": "function",
+                        "name": loc_name,
+                        "kind": loc_kind,
                     }
                 ],
             }

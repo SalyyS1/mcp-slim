@@ -558,6 +558,8 @@ def wrap_config(
     block_sampling: bool = False,
     pin_schemas: bool = False,
     tabular_arrays: bool = False,
+    allow_resource_prefixes: str | None = None,
+    deny_resource_prefixes: str | None = None,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -589,6 +591,10 @@ def wrap_config(
       prefix.append("--pin-schemas")
     if tabular_arrays:
       prefix.append("--tabular-arrays")
+    if allow_resource_prefixes:
+      prefix.extend(["--allow-resource-prefixes", allow_resource_prefixes])
+    if deny_resource_prefixes:
+      prefix.extend(["--deny-resource-prefixes", deny_resource_prefixes])
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -707,6 +713,18 @@ def main(argv: list[str] | None = None) -> int:
       help="Allow newly added tools during --pin-schemas sessions while still quarantining mutations to existing tools",
   )
   run_p.add_argument(
+      "--allow-resource-prefixes",
+      type=str,
+      default=None,
+      help="Comma-separated allowlist of MCP resource URI prefixes or globs (e.g. 'file:///workspace/,postgres://readonly/')",
+  )
+  run_p.add_argument(
+      "--deny-resource-prefixes",
+      type=str,
+      default=None,
+      help="Comma-separated denylist of MCP resource URI prefixes or globs (e.g. 'file:///etc/,file://*/.ssh/*')",
+  )
+  run_p.add_argument(
       "--tabular-arrays",
       action="store_true",
       help="Compact homogeneous arrays of flat JSON objects in tools/call outputs into columnar tables",
@@ -816,6 +834,18 @@ def main(argv: list[str] | None = None) -> int:
       "--tabular-arrays",
       action="store_true",
       help="Wrap servers with --tabular-arrays columnar output compaction",
+  )
+  wrap_p.add_argument(
+      "--allow-resource-prefixes",
+      type=str,
+      default=None,
+      help="Wrap servers with --allow-resource-prefixes URI allowlist enforcement",
+  )
+  wrap_p.add_argument(
+      "--deny-resource-prefixes",
+      type=str,
+      default=None,
+      help="Wrap servers with --deny-resource-prefixes URI denylist enforcement",
   )
   wrap_p.add_argument(
       "--runner",
@@ -971,6 +1001,8 @@ def main(argv: list[str] | None = None) -> int:
         block_sampling=parsed.block_sampling,
         pin_schemas=parsed.pin_schemas,
         tabular_arrays=parsed.tabular_arrays,
+        allow_resource_prefixes=parsed.allow_resource_prefixes,
+        deny_resource_prefixes=parsed.deny_resource_prefixes,
     )
 
   if parsed.subcommand == "bridge":
@@ -996,6 +1028,16 @@ def main(argv: list[str] | None = None) -> int:
         {t.strip() for t in parsed.deny_tools.split(",") if t.strip()}
         if parsed.deny_tools
         else set()
+    )
+    allow_res_set = (
+        {p.strip() for p in parsed.allow_resource_prefixes.split(",") if p.strip()}
+        if parsed.allow_resource_prefixes
+        else None
+    )
+    deny_res_set = (
+        {p.strip() for p in parsed.deny_resource_prefixes.split(",") if p.strip()}
+        if parsed.deny_resource_prefixes
+        else None
     )
     proxy = MCPProxy(
         schema_slimmer=SchemaSlimmer(
@@ -1023,6 +1065,8 @@ def main(argv: list[str] | None = None) -> int:
         block_sampling=parsed.block_sampling,
         pin_schemas=parsed.pin_schemas,
         allow_new_tools=parsed.allow_new_tools,
+        allow_resource_prefixes=allow_res_set,
+        deny_resource_prefixes=deny_res_set,
         otel_jsonl_path=parsed.otel_jsonl,
     )
     return asyncio.run(proxy.run_stdio(cmd))

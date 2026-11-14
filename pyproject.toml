@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-slim"
-version = "1.0.0"
-description = "Zero-config MCP proxy for schema/output token compression, $defs/$ref inlining, rug-pull schema pinning, and real-time secret redaction."
+version = "1.1.0"
+description = "Zero-config MCP proxy for schema/output token compression, $defs/$ref inlining, rug-pull schema pinning, resource URI allowlists, and real-time secret redaction."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

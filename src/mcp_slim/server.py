@@ -12,6 +12,7 @@ from .guard import SecretGuard
 from .slimmer import (
     SchemaSlimmer,
     SlimStats,
+    audit_resources_manifest,
     audit_tools_manifest,
     diff_tools_manifests,
 )
@@ -87,6 +88,34 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["before_tools", "after_tools"],
+        },
+    },
+    {
+        "name": "audit_mcp_resources",
+        "description": (
+            "Audit MCP resources or resource read contents for URI prefix policy violations, "
+            "path traversal, leaked secrets (including base64 blobs), and indirect prompt injection."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "resources": {
+                    "type": "array",
+                    "description": "Array of MCP resource or resource content objects.",
+                    "items": {"type": "object"},
+                },
+                "allow_prefixes": {
+                    "type": "array",
+                    "description": "Optional allowlist of URI prefixes or globs.",
+                    "items": {"type": "string"},
+                },
+                "deny_prefixes": {
+                    "type": "array",
+                    "description": "Optional denylist of URI prefixes or globs.",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["resources"],
         },
     },
     {
@@ -240,6 +269,41 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
                   before_tools,
                   after_tools,
                   allow_new_tools=bool(args.get("allow_new_tools", False)),
+              )
+          ),
+      }
+
+    if name == "audit_mcp_resources":
+      resources = args.get("resources")
+      if not isinstance(resources, list):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(
+                "Parameter 'resources' must be a JSON array.",
+                is_error=True,
+            ),
+        }
+      raw_allow = args.get("allow_prefixes")
+      raw_deny = args.get("deny_prefixes")
+      allow_list = (
+          [str(x) for x in raw_allow if isinstance(x, str) and x.strip()]
+          if isinstance(raw_allow, list)
+          else None
+      )
+      deny_list = (
+          [str(x) for x in raw_deny if isinstance(x, str) and x.strip()]
+          if isinstance(raw_deny, list)
+          else None
+      )
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(
+              audit_resources_manifest(
+                  resources,
+                  allow_prefixes=allow_list,
+                  deny_prefixes=deny_list,
               )
           ),
       }
