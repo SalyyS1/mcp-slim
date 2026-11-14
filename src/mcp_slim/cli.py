@@ -20,6 +20,7 @@ from .slimmer import (
     SlimStats,
     audit_tools_manifest,
     build_audit_sarif,
+    diff_tools_manifests,
     estimate_tokens,
 )
 from .telemetry import StatsLedger
@@ -280,6 +281,26 @@ def _print_tools_audit(tools: list[dict[str, Any]], label: str = "") -> int:
   return 0
 
 
+def _load_tools_file(path: Path) -> list[dict[str, Any]] | None:
+  raw_data = json.loads(path.read_text(encoding="utf-8"))
+  if isinstance(raw_data, list):
+    return raw_data
+  if isinstance(raw_data, dict) and isinstance(raw_data.get("tools"), list):
+    return raw_data["tools"]
+  if isinstance(raw_data, dict) and isinstance(raw_data.get("result"), dict):
+    inner = raw_data["result"].get("tools")
+    if isinstance(inner, list):
+      return inner
+  if isinstance(raw_data, dict) and isinstance(raw_data.get("servers"), dict):
+    return [
+        t
+        for srv_tools in raw_data["servers"].values()
+        if isinstance(srv_tools, list)
+        for t in srv_tools
+    ]
+  return None
+
+
 def run_audit(
     path: Path | None = None,
     json_output: bool = False,
@@ -287,21 +308,11 @@ def run_audit(
     fail_on_security: bool = False,
 ) -> int:
   if path is not None:
-    raw_data = json.loads(path.read_text(encoding="utf-8"))
-    if isinstance(raw_data, list):
-      tools = raw_data
-    elif isinstance(raw_data, dict) and isinstance(raw_data.get("tools"), list):
-      tools = raw_data["tools"]
-    elif isinstance(raw_data, dict) and isinstance(raw_data.get("servers"), dict):
-      tools = [
-          t
-          for srv_tools in raw_data["servers"].values()
-          if isinstance(srv_tools, list)
-          for t in srv_tools
-      ]
-    else:
+    loaded = _load_tools_file(path)
+    if loaded is None:
       sys.stderr.write(f"Could not locate a tools list inside {path}\n")
       return 1
+    tools = loaded
   else:
     tools = SAMPLE_BENCHMARK_TOOLS
 
@@ -332,6 +343,62 @@ def run_audit(
           print(f"  [{f['rule_id']}] {f['message']}")
 
   if fail_on_security and report["security_findings"] > 0:
+    return 2
+  return 0
+
+
+def run_diff(
+    before_path: Path,
+    after_path: Path,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+    fail_on_mutation: bool = False,
+    allow_new_tools: bool = False,
+) -> int:
+  before_tools = _load_tools_file(before_path)
+  if before_tools is None:
+    sys.stderr.write(f"Could not locate a tools list inside {before_path}\n")
+    return 1
+  after_tools = _load_tools_file(after_path)
+  if after_tools is None:
+    sys.stderr.write(f"Could not locate a tools list inside {after_path}\n")
+    return 1
+
+  report = diff_tools_manifests(
+      before_tools, after_tools, allow_new_tools=allow_new_tools
+  )
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri=str(after_path),
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+  else:
+    print(
+        f"mcp-slim Manifest Diff ({before_path.name} -> {after_path.name})"
+    )
+    print("=" * 78)
+    print(
+        f"Tools: {report['tools_before']} -> {report['tools_after']} | "
+        f"Unchanged: {report['unchanged']} | Modified: {report['modified']} | "
+        f"Escalations: {report['privilege_escalations']} | "
+        f"Added: {report['added']} | Removed: {report['removed']}"
+    )
+    if report["findings"]:
+      print("-" * 78)
+      for f in report["findings"]:
+        print(f"[{f['rule_id']}:{f['level'].upper()}] {f['message']}")
+    print("=" * 78)
+
+  if fail_on_mutation and report["blocking_mutations"] > 0:
     return 2
   return 0
 
@@ -489,6 +556,8 @@ def wrap_config(
     runner: str = "mcp-slim",
     read_only: bool = False,
     block_sampling: bool = False,
+    pin_schemas: bool = False,
+    tabular_arrays: bool = False,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -516,6 +585,10 @@ def wrap_config(
       prefix.append("--read-only")
     if block_sampling:
       prefix.append("--block-sampling")
+    if pin_schemas:
+      prefix.append("--pin-schemas")
+    if tabular_arrays:
+      prefix.append("--tabular-arrays")
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -624,6 +697,21 @@ def main(argv: list[str] | None = None) -> int:
       help="Reject server-initiated sampling/createMessage requests locally with a JSON-RPC policy error",
   )
   run_p.add_argument(
+      "--pin-schemas",
+      action="store_true",
+      help="Pin canonical SHA-256 tool hashes on initial tools/list and quarantine mid-session rug-pull mutations",
+  )
+  run_p.add_argument(
+      "--allow-new-tools",
+      action="store_true",
+      help="Allow newly added tools during --pin-schemas sessions while still quarantining mutations to existing tools",
+  )
+  run_p.add_argument(
+      "--tabular-arrays",
+      action="store_true",
+      help="Compact homogeneous arrays of flat JSON objects in tools/call outputs into columnar tables",
+  )
+  run_p.add_argument(
       "--otel-jsonl",
       type=Path,
       default=None,
@@ -720,6 +808,16 @@ def main(argv: list[str] | None = None) -> int:
       help="Wrap servers with --block-sampling policy enforcement",
   )
   wrap_p.add_argument(
+      "--pin-schemas",
+      action="store_true",
+      help="Wrap servers with --pin-schemas mid-session rug-pull protection",
+  )
+  wrap_p.add_argument(
+      "--tabular-arrays",
+      action="store_true",
+      help="Wrap servers with --tabular-arrays columnar output compaction",
+  )
+  wrap_p.add_argument(
       "--runner",
       choices=("mcp-slim", "uvx", "npx"),
       default="mcp-slim",
@@ -753,6 +851,35 @@ def main(argv: list[str] | None = None) -> int:
       "--fail-on-security",
       action="store_true",
       help="Exit with code 2 when MS001/MS002 tool-poisoning or embedded-secret findings are detected",
+  )
+
+  diff_p = sub.add_parser(
+      "diff",
+      help="Compare two MCP tools JSON manifests for rug-pull mutations, privilege escalations, and poisoning",
+  )
+  diff_p.add_argument("before", type=Path, help="Baseline tools JSON manifest")
+  diff_p.add_argument("after", type=Path, help="Updated tools JSON manifest")
+  diff_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON diff report",
+  )
+  diff_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
+  )
+  diff_p.add_argument(
+      "--fail-on-mutation",
+      action="store_true",
+      help="Exit with code 2 when blocking tool mutations, privilege escalations, or security findings exist",
+  )
+  diff_p.add_argument(
+      "--allow-new-tools",
+      action="store_true",
+      help="Treat newly added tools as non-blocking notes",
   )
 
   inspect_p = sub.add_parser(
@@ -816,6 +943,16 @@ def main(argv: list[str] | None = None) -> int:
         fail_on_security=parsed.fail_on_security,
     )
 
+  if parsed.subcommand == "diff":
+    return run_diff(
+        parsed.before,
+        parsed.after,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+        fail_on_mutation=parsed.fail_on_mutation,
+        allow_new_tools=parsed.allow_new_tools,
+    )
+
   if parsed.subcommand == "inspect":
     cmd = list(parsed.command)
     if cmd and cmd[0] == "--":
@@ -832,6 +969,8 @@ def main(argv: list[str] | None = None) -> int:
         runner=parsed.runner,
         read_only=parsed.read_only,
         block_sampling=parsed.block_sampling,
+        pin_schemas=parsed.pin_schemas,
+        tabular_arrays=parsed.tabular_arrays,
     )
 
   if parsed.subcommand == "bridge":
@@ -867,7 +1006,7 @@ def main(argv: list[str] | None = None) -> int:
             preserve_root_unions=parsed.preserve_root_unions,
             read_only_only=parsed.read_only,
         ),
-        output_slimmer=OutputSlimmer(),
+        output_slimmer=OutputSlimmer(tabular_arrays=parsed.tabular_arrays),
         secret_guard=SecretGuard(
             enabled=not parsed.no_secret_guard,
             vault_handles=parsed.vault_handles,
@@ -882,6 +1021,8 @@ def main(argv: list[str] | None = None) -> int:
             path=parsed.stats_file, enabled=not parsed.no_stats
         ),
         block_sampling=parsed.block_sampling,
+        pin_schemas=parsed.pin_schemas,
+        allow_new_tools=parsed.allow_new_tools,
         otel_jsonl_path=parsed.otel_jsonl,
     )
     return asyncio.run(proxy.run_stdio(cmd))

@@ -31,6 +31,8 @@ COUNTER_KEYS: tuple[str, ...] = (
     "coerced_arguments",
     "cache_hits",
     "blocked_calls",
+    "rug_pulls_blocked",
+    "tables_compacted",
     "secrets_redacted",
 )
 
@@ -427,6 +429,8 @@ class StatsLedger:
       coerced_arguments: int = 0,
       cache_hits: int = 0,
       blocked_calls: int = 0,
+      rug_pulls_blocked: int = 0,
+      tables_compacted: int = 0,
   ) -> dict[str, Any]:
     """Records one proxy session into the cumulative ledger without ever raising."""
     if not self.enabled or is_stats_disabled_by_env():
@@ -481,6 +485,14 @@ class StatsLedger:
           ),
           "blocked_calls": (
               (stats.blocked_calls if stats is not None else 0) + blocked_calls
+          ),
+          "rug_pulls_blocked": (
+              (stats.rug_pulls_blocked if stats is not None else 0)
+              + rug_pulls_blocked
+          ),
+          "tables_compacted": (
+              (stats.tables_compacted if stats is not None else 0)
+              + tables_compacted
           ),
           "secrets_redacted": max(0, int(secrets_redacted)),
       }

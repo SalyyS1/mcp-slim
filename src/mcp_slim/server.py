@@ -13,6 +13,7 @@ from .slimmer import (
     SchemaSlimmer,
     SlimStats,
     audit_tools_manifest,
+    diff_tools_manifests,
 )
 from .telemetry import StatsLedger
 
@@ -59,6 +60,33 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 }
             },
             "required": ["tools"],
+        },
+    },
+    {
+        "name": "diff_mcp_tools",
+        "description": (
+            "Compare two MCP tools/list snapshots for rug-pull description edits, "
+            "inputSchema tampering, and ToolAnnotations privilege escalations."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "before_tools": {
+                    "type": "array",
+                    "description": "Baseline array of MCP tool objects.",
+                    "items": {"type": "object"},
+                },
+                "after_tools": {
+                    "type": "array",
+                    "description": "Updated array of MCP tool objects to compare against baseline.",
+                    "items": {"type": "object"},
+                },
+                "allow_new_tools": {
+                    "type": "boolean",
+                    "description": "Treat newly added tools as non-blocking notes.",
+                },
+            },
+            "required": ["before_tools", "after_tools"],
         },
     },
     {
@@ -190,6 +218,30 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
           "jsonrpc": "2.0",
           "id": msg_id,
           "result": _text_result(audit_tools_manifest(tools)),
+      }
+
+    if name == "diff_mcp_tools":
+      before_tools = args.get("before_tools")
+      after_tools = args.get("after_tools")
+      if not isinstance(before_tools, list) or not isinstance(after_tools, list):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(
+                "Parameters 'before_tools' and 'after_tools' must be JSON arrays.",
+                is_error=True,
+            ),
+        }
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(
+              diff_tools_manifests(
+                  before_tools,
+                  after_tools,
+                  allow_new_tools=bool(args.get("allow_new_tools", False)),
+              )
+          ),
       }
 
     if name == "redact_secrets":

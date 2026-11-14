@@ -233,7 +233,13 @@ class TestMcpSlimV070(unittest.TestCase):
     tool_names = {t["name"] for t in tools_resp["result"]["tools"]}
     self.assertEqual(
         tool_names,
-        {"compact_mcp_tools", "audit_mcp_schema", "redact_secrets", "get_slim_stats"},
+        {
+            "compact_mcp_tools",
+            "audit_mcp_schema",
+            "diff_mcp_tools",
+            "redact_secrets",
+            "get_slim_stats",
+        },
     )
 
     redact_resp = handle_server_rpc({

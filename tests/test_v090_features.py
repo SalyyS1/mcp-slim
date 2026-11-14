@@ -399,7 +399,7 @@ class TestOTelJsonlSpanExporter(unittest.TestCase):
         self.assertEqual(len(sp["span_id"]), 16)
         self.assertEqual(len(sp["parent_span_id"]), 16)
         self.assertEqual(sp["resource"]["service.name"], "mcp-slim")
-        self.assertEqual(sp["resource"]["service.version"], "0.9.0")
+        self.assertEqual(sp["resource"]["service.version"], "1.0.0")
         self.assertEqual(sp["resource"]["mcp.server.label"], "github-mcp")
         self.assertGreaterEqual(sp["end_time_unix_nano"], sp["start_time_unix_nano"])
         # Raw leaked secret from SAMPLE_BENCHMARK_OUTPUT never appears in span JSON

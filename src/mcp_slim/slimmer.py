@@ -6,6 +6,7 @@ import copy
 from dataclasses import dataclass, field
 import difflib
 import fnmatch
+import hashlib
 import json
 import math
 import re
@@ -165,6 +166,8 @@ class SlimStats:
   cache_hits: int = 0
   args_coerced: int = 0
   blocked_calls: int = 0
+  rug_pulls_blocked: int = 0
+  tables_compacted: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -1170,14 +1173,83 @@ class OutputSlimmer:
       strip_nulls: bool = True,
       strip_hypermedia: bool = True,
       flatten_resources: bool = True,
+      tabular_arrays: bool = False,
+      min_table_rows: int = 4,
   ) -> None:
     self.max_list_items = max_list_items
     self.max_string_chars = max_string_chars
     self.strip_nulls = strip_nulls
     self.strip_hypermedia = strip_hypermedia
     self.flatten_resources = flatten_resources
+    self.tabular_arrays = tabular_arrays
+    self.min_table_rows = max(2, min_table_rows)
 
-  def compact_json_value(self, value: Any) -> Any:
+  @staticmethod
+  def _is_scalar_cell(val: Any) -> bool:
+    return val is None or isinstance(val, (str, int, float, bool))
+
+  def _maybe_tabularize_list(
+      self, items: list[Any], stats: SlimStats | None = None
+  ) -> Any:
+    """Converts homogeneous arrays of flat dicts into a compact columnar table when smaller."""
+    if not self.tabular_arrays or len(items) < self.min_table_rows:
+      return items
+    truncated_note: str | None = None
+    dict_rows = items
+    if (
+        isinstance(items[-1], str)
+        and items[-1].startswith("... (")
+        and items[-1].endswith("truncated by mcp-slim)")
+    ):
+      truncated_note = items[-1]
+      dict_rows = items[:-1]
+    if len(dict_rows) < self.min_table_rows:
+      return items
+    if not all(isinstance(r, dict) and r for r in dict_rows):
+      return items
+
+    columns: list[str] = []
+    seen_cols: set[str] = set()
+    for row in dict_rows:
+      for k, v in row.items():
+        if not isinstance(k, str) or not self._is_scalar_cell(v):
+          return items
+        if k not in seen_cols:
+          seen_cols.add(k)
+          columns.append(k)
+
+    if len(columns) < 2 or len(columns) > 32:
+      return items
+
+    min_overlap = math.ceil(len(columns) * 0.75)
+    for row in dict_rows:
+      if len(row) < min_overlap:
+        return items
+
+    matrix = [[row.get(col) for col in columns] for row in dict_rows]
+    table_obj: dict[str, Any] = {
+        "_table": True,
+        "columns": columns,
+        "rows": matrix,
+    }
+    if truncated_note is not None:
+      table_obj["truncated"] = truncated_note
+
+    raw_bytes = len(
+        json.dumps(items, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    tab_bytes = len(
+        json.dumps(table_obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    if tab_bytes < raw_bytes:
+      if stats is not None:
+        stats.tables_compacted += 1
+      return table_obj
+    return items
+
+  def compact_json_value(
+      self, value: Any, stats: SlimStats | None = None
+  ) -> Any:
     if isinstance(value, dict):
       out: dict[str, Any] = {}
       for k, v in value.items():
@@ -1185,7 +1257,7 @@ class OutputSlimmer:
           continue
         if self.strip_nulls and (v is None or v == "" or v == [] or v == {}):
           continue
-        compacted = self.compact_json_value(v)
+        compacted = self.compact_json_value(v, stats=stats)
         if self.strip_nulls and (
             compacted is None
             or compacted == ""
@@ -1198,13 +1270,15 @@ class OutputSlimmer:
     if isinstance(value, list):
       total = len(value)
       sliced = value[: self.max_list_items]
-      compacted_list = [self.compact_json_value(item) for item in sliced]
+      compacted_list = [
+          self.compact_json_value(item, stats=stats) for item in sliced
+      ]
       if total > self.max_list_items:
         compacted_list.append(
             f"... ({total - self.max_list_items} more items truncated by"
             " mcp-slim)"
         )
-      return compacted_list
+      return self._maybe_tabularize_list(compacted_list, stats=stats)
     if isinstance(value, str):
       cleaned_val = _LONE_SURROGATE.sub("\ufffd", value)
       if len(cleaned_val) > self.max_string_chars:
@@ -1250,7 +1324,7 @@ class OutputSlimmer:
 
     return serialized
 
-  def slim_text(self, text: str) -> str:
+  def slim_text(self, text: str, stats: SlimStats | None = None) -> str:
     if not text:
       return text
     cleaned = _LONE_SURROGATE.sub("\ufffd", _ANSI_ESCAPE.sub("", text))
@@ -1258,7 +1332,7 @@ class OutputSlimmer:
     if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
       try:
         parsed = json.loads(stripped)
-        compacted = self.compact_json_value(parsed)
+        compacted = self.compact_json_value(parsed, stats=stats)
         return self._fit_json_within_budget(compacted)
       except (json.JSONDecodeError, TypeError):
         pass
@@ -1318,7 +1392,7 @@ class OutputSlimmer:
         if isinstance(item, dict) and item.get("type") == "text":
           text = item.get("text")
           if isinstance(text, str):
-            item = {**item, "text": self.slim_text(text)}
+            item = {**item, "text": self.slim_text(text, stats=stats)}
         elif (
             isinstance(item, dict)
             and item.get("type") == "resource"
@@ -1327,7 +1401,7 @@ class OutputSlimmer:
           res = item["resource"]
           res_text = res.get("text")
           if isinstance(res_text, str):
-            slimmed_res = self.slim_text(res_text)
+            slimmed_res = self.slim_text(res_text, stats=stats)
             if self.flatten_resources:
               uri = res.get("uri")
               header = f"[Resource: {uri}]\n" if isinstance(uri, str) and uri else ""
@@ -1339,7 +1413,7 @@ class OutputSlimmer:
     if "structuredContent" in out and isinstance(
         out["structuredContent"], (dict, list)
     ):
-      compacted_sc = self.compact_json_value(out["structuredContent"])
+      compacted_sc = self.compact_json_value(out["structuredContent"], stats=stats)
       if compacted_sc in (None, {}, []):
         out.pop("structuredContent", None)
       else:
@@ -1444,7 +1518,313 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         },
         "defaultConfiguration": {"level": "note"},
     },
+    {
+        "id": "MS005",
+        "name": "ToolRugPullMutation",
+        "shortDescription": {
+            "text": "MCP tool definition mutated description, inputSchema, or safety annotations relative to pinned baseline."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
 )
+
+
+def _canonical_tool_components(tool: dict[str, Any]) -> dict[str, Any]:
+  """Extracts deterministic fields used for SHA-256 tool schema pinning."""
+  name = str(tool.get("name", ""))
+  desc = str(tool.get("description", ""))
+  schema = tool.get("inputSchema")
+  norm_schema = schema if isinstance(schema, dict) else {}
+  annotations = SchemaSlimmer.extract_annotations(tool)
+  return {
+      "name": name,
+      "description": desc,
+      "inputSchema": norm_schema,
+      "annotations": annotations,
+  }
+
+
+def compute_tool_fingerprint(tool: dict[str, Any]) -> str:
+  """Computes a canonical SHA-256 hex digest over a tool's name, description, schema, and annotations."""
+  canonical = json.dumps(
+      _canonical_tool_components(tool),
+      ensure_ascii=False,
+      sort_keys=True,
+      separators=(",", ":"),
+  )
+  return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _has_privilege_escalation(
+    before_ann: dict[str, bool], after_ann: dict[str, bool]
+) -> list[str]:
+  """Detects MCP ToolAnnotations changes that widen execution authority or side-effect risk."""
+  escalations: list[str] = []
+  if before_ann.get("readOnlyHint") is True and after_ann.get("readOnlyHint") is not True:
+    escalations.append("readOnlyHint:True->False")
+  if before_ann.get("destructiveHint") is False and after_ann.get("destructiveHint") is True:
+    escalations.append("destructiveHint:False->True")
+  elif "destructiveHint" not in before_ann and after_ann.get("destructiveHint") is True:
+    escalations.append("destructiveHint:unset->True")
+  if before_ann.get("openWorldHint") is False and after_ann.get("openWorldHint") is True:
+    escalations.append("openWorldHint:False->True")
+  return escalations
+
+
+@dataclass(frozen=True)
+class ToolMutation:
+  """Describes a detected mid-session or cross-version MCP tool mutation (rug-pull hazard)."""
+
+  tool: str
+  kind: str  # "privilege_escalation", "modified", "added", "removed"
+  changed_fields: tuple[str, ...]
+  baseline_sha256: str
+  current_sha256: str
+  level: str  # "error", "warning", "note"
+  message: str
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+        "rule_id": "MS005",
+        "level": self.level,
+        "tool": self.tool,
+        "kind": self.kind,
+        "changed_fields": list(self.changed_fields),
+        "baseline_sha256": self.baseline_sha256,
+        "current_sha256": self.current_sha256,
+        "message": self.message,
+    }
+
+
+def _compare_tool_pair(
+    before_tool: dict[str, Any], after_tool: dict[str, Any]
+) -> ToolMutation | None:
+  before_hash = compute_tool_fingerprint(before_tool)
+  after_hash = compute_tool_fingerprint(after_tool)
+  if before_hash == after_hash:
+    return None
+
+  b_comp = _canonical_tool_components(before_tool)
+  a_comp = _canonical_tool_components(after_tool)
+  name = a_comp["name"] or b_comp["name"]
+  changed: list[str] = []
+  for key in ("description", "inputSchema", "annotations"):
+    if json.dumps(b_comp[key], sort_keys=True) != json.dumps(a_comp[key], sort_keys=True):
+      changed.append(key)
+
+  escalations = _has_privilege_escalation(b_comp["annotations"], a_comp["annotations"])
+  if escalations:
+    esc_str = ", ".join(escalations)
+    return ToolMutation(
+        tool=name,
+        kind="privilege_escalation",
+        changed_fields=tuple(changed or ["annotations"]),
+        baseline_sha256=before_hash,
+        current_sha256=after_hash,
+        level="error",
+        message=(
+            f"Tool '{name}' escalated MCP safety annotations ({esc_str}) "
+            f"across fields [{', '.join(changed)}]."
+        ),
+    )
+
+  return ToolMutation(
+      tool=name,
+      kind="modified",
+      changed_fields=tuple(changed),
+      baseline_sha256=before_hash,
+      current_sha256=after_hash,
+      level="error",
+      message=(
+          f"Tool '{name}' mutated pinned definition fields [{', '.join(changed)}] "
+          f"(baseline {before_hash[:12]} -> {after_hash[:12]})."
+      ),
+  )
+
+
+class ToolPinGuard:
+  """Session-scoped MCP rug-pull detector (`--pin-schemas`).
+
+  Pins canonical SHA-256 digests of every tool on the initial `tools/list` response and
+  quarantines any tool whose `description`, `inputSchema`, or `annotations` mutate on a
+  subsequent `tools/list` turn (or is injected unannounced mid-session).
+  """
+
+  def __init__(
+      self, enabled: bool = False, allow_new_tools: bool = False
+  ) -> None:
+    self.enabled = enabled
+    self.allow_new_tools = allow_new_tools
+    self._baselined: bool = False
+    self._baseline_tools: dict[str, dict[str, Any]] = {}
+    self._baseline_hashes: dict[str, str] = {}
+    self.quarantined: dict[str, ToolMutation] = {}
+    self.mutations: list[ToolMutation] = []
+
+  @property
+  def is_baselined(self) -> bool:
+    return self._baselined
+
+  def baseline_hashes(self) -> dict[str, str]:
+    return dict(self._baseline_hashes)
+
+  def get_quarantine(self, tool_name: str) -> ToolMutation | None:
+    if not self.enabled:
+      return None
+    return self.quarantined.get(tool_name)
+
+  def verify_or_pin(
+      self, tools: list[dict[str, Any]], stats: SlimStats | None = None
+  ) -> tuple[list[dict[str, Any]], list[ToolMutation]]:
+    """Pins baseline on first `tools/list`, then filters & quarantines mutated tools."""
+    if not self.enabled:
+      return tools, []
+
+    if not self._baselined:
+      for t in tools:
+        if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"]:
+          name = t["name"]
+          self._baseline_tools[name] = copy.deepcopy(t)
+          self._baseline_hashes[name] = compute_tool_fingerprint(t)
+      self._baselined = True
+      return tools, []
+
+    turn_mutations: list[ToolMutation] = []
+    verified: list[dict[str, Any]] = []
+    for t in tools:
+      if not isinstance(t, dict):
+        continue
+      name = t.get("name")
+      if not isinstance(name, str) or not name:
+        continue
+      if name in self.quarantined:
+        continue
+      if name not in self._baseline_tools:
+        cur_hash = compute_tool_fingerprint(t)
+        if self.allow_new_tools:
+          self._baseline_tools[name] = copy.deepcopy(t)
+          self._baseline_hashes[name] = cur_hash
+          verified.append(t)
+          continue
+        mut = ToolMutation(
+            tool=name,
+            kind="added",
+            changed_fields=("tool_added",),
+            baseline_sha256="",
+            current_sha256=cur_hash,
+            level="error",
+            message=(
+                f"Tool '{name}' was injected mid-session after initial tools/list "
+                f"pinning (sha256 {cur_hash[:12]})."
+            ),
+        )
+        self.quarantined[name] = mut
+        self.mutations.append(mut)
+        turn_mutations.append(mut)
+        if stats is not None:
+          stats.rug_pulls_blocked += 1
+        continue
+
+      diff_mut = _compare_tool_pair(self._baseline_tools[name], t)
+      if diff_mut is not None:
+        self.quarantined[name] = diff_mut
+        self.mutations.append(diff_mut)
+        turn_mutations.append(diff_mut)
+        if stats is not None:
+          stats.rug_pulls_blocked += 1
+        continue
+
+      verified.append(t)
+
+    return verified, turn_mutations
+
+
+def diff_tools_manifests(
+    before_tools: list[dict[str, Any]],
+    after_tools: list[dict[str, Any]],
+    *,
+    allow_new_tools: bool = False,
+) -> dict[str, Any]:
+  """Compares two MCP `tools/list` manifests for rug-pull mutations, privilege escalations, and poisoning."""
+  before_map: dict[str, dict[str, Any]] = {
+      str(t["name"]): t
+      for t in before_tools
+      if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"]
+  }
+  after_map: dict[str, dict[str, Any]] = {
+      str(t["name"]): t
+      for t in after_tools
+      if isinstance(t, dict) and isinstance(t.get("name"), str) and t["name"]
+  }
+
+  mutations: list[dict[str, Any]] = []
+  unchanged_count = 0
+
+  for name in sorted(set(before_map) | set(after_map)):
+    b_tool = before_map.get(name)
+    a_tool = after_map.get(name)
+    if b_tool is not None and a_tool is None:
+      b_hash = compute_tool_fingerprint(b_tool)
+      mutations.append(
+          ToolMutation(
+              tool=name,
+              kind="removed",
+              changed_fields=("tool_removed",),
+              baseline_sha256=b_hash,
+              current_sha256="",
+              level="note",
+              message=f"Tool '{name}' was removed since baseline ({b_hash[:12]}).",
+          ).to_dict()
+      )
+    elif b_tool is None and a_tool is not None:
+      a_hash = compute_tool_fingerprint(a_tool)
+      lvl = "note" if allow_new_tools else "warning"
+      mutations.append(
+          ToolMutation(
+              tool=name,
+              kind="added",
+              changed_fields=("tool_added",),
+              baseline_sha256="",
+              current_sha256=a_hash,
+              level=lvl,
+              message=f"Tool '{name}' was added since baseline ({a_hash[:12]}).",
+          ).to_dict()
+      )
+    elif b_tool is not None and a_tool is not None:
+      mut = _compare_tool_pair(b_tool, a_tool)
+      if mut is not None:
+        mutations.append(mut.to_dict())
+      else:
+        unchanged_count += 1
+
+  after_audit = audit_tools_manifest(list(after_map.values()))
+  poison_or_secret = [
+      f for f in after_audit["findings"] if f["rule_id"] in ("MS001", "MS002")
+  ]
+  all_findings = [*mutations, *poison_or_secret]
+
+  blocking_count = sum(
+      1
+      for m in mutations
+      if m["kind"] in ("privilege_escalation", "modified")
+      or (m["kind"] == "added" and not allow_new_tools)
+  ) + len(poison_or_secret)
+
+  return {
+      "tools_before": len(before_map),
+      "tools_after": len(after_map),
+      "unchanged": unchanged_count,
+      "modified": sum(1 for m in mutations if m["kind"] == "modified"),
+      "privilege_escalations": sum(
+          1 for m in mutations if m["kind"] == "privilege_escalation"
+      ),
+      "added": sum(1 for m in mutations if m["kind"] == "added"),
+      "removed": sum(1 for m in mutations if m["kind"] == "removed"),
+      "security_findings": len(poison_or_secret),
+      "blocking_mutations": blocking_count,
+      "mutations": mutations,
+      "findings": all_findings,
+  }
 
 
 def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1581,7 +1961,7 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "0.9.0",
+    version: str = "1.0.0",
 ) -> dict[str, Any]:
   """Formats an `audit_tools_manifest` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []

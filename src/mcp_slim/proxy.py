@@ -16,6 +16,7 @@ from .slimmer import (
     OutputSlimmer,
     SchemaSlimmer,
     SlimStats,
+    ToolPinGuard,
     estimate_tokens,
 )
 from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
@@ -37,6 +38,9 @@ class MCPProxy:
       no_stats: bool = False,
       stats_ledger: StatsLedger | None = None,
       block_sampling: bool = False,
+      pin_schemas: bool = False,
+      allow_new_tools: bool = False,
+      pin_guard: ToolPinGuard | None = None,
       otel_exporter: OTelSpanExporter | None = None,
       otel_jsonl_path: Path | str | None = None,
   ) -> None:
@@ -54,6 +58,12 @@ class MCPProxy:
     self.bridge_socket = bridge_socket
     self.no_stats = no_stats
     self.block_sampling = block_sampling
+    self.pin_schemas = pin_schemas
+    self.pin_guard = (
+        pin_guard
+        if pin_guard is not None
+        else ToolPinGuard(enabled=pin_schemas, allow_new_tools=allow_new_tools)
+    )
     self.stats_ledger = (
         stats_ledger
         if stats_ledger is not None
@@ -260,6 +270,44 @@ class MCPProxy:
 
       if isinstance(tool_name, str):
         resolved_tool_name = tool_name
+        quarantine_mut = self.pin_guard.get_quarantine(tool_name)
+        if quarantine_mut is not None:
+          self.stats.blocked_calls += 1
+          self.stats.rug_pulls_blocked += 1
+          pin_msg = (
+              f"[mcp-slim] Tool '{tool_name}' is quarantined by --pin-schemas: "
+              f"{quarantine_mut.message}"
+          )
+          pin_payload = {
+              "jsonrpc": msg.get("jsonrpc", "2.0"),
+              "id": msg_id,
+              "result": {
+                  "content": [{"type": "text", "text": pin_msg}],
+                  "isError": True,
+              },
+          }
+          self._local_responses.append(
+              json.dumps(pin_payload, ensure_ascii=False, separators=(",", ":"))
+              + "\n"
+          )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.tools/call {tool_name}",
+              kind="CLIENT",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=pin_msg,
+              attributes={
+                  "mcp.method.name": "tools/call",
+                  "mcp.tool.name": tool_name,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.rug_pull_quarantined": True,
+              },
+          )
+          return ""
 
       if isinstance(tool_name, str) and not self.schema_slimmer.is_tool_allowed(tool_name):
         self.stats.blocked_calls += 1
@@ -563,7 +611,13 @@ class MCPProxy:
         raw_tools = result.get("tools")
         if isinstance(raw_tools, list):
           orig_tok = estimate_tokens(raw_tools)
-          tools = self.secret_guard.redact_value(raw_tools)
+          verified_tools, pin_mutations = self.pin_guard.verify_or_pin(
+              raw_tools, stats=self.stats
+          )
+          if not self.quiet and pin_mutations:
+            for pm in pin_mutations:
+              sys.stderr.write(f"[mcp-slim] Security Pin Alert: {pm.message}\n")
+          tools = self.secret_guard.redact_value(verified_tools)
           sanitized_tok = estimate_tokens(tools)
           slimmed_list = self.schema_slimmer.slim_tools_list(
               tools, stats=None if self.lazy_broker is not None else self.stats

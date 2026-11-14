@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
   "name": "io.github.SalyyS1/mcp-slim",
-  "description": "Zero-dependency MCP stdio proxy and server for schema token compaction, $ref inlining, and secret redaction.",
-  "version": "0.9.0",
+  "description": "Zero-dependency MCP stdio proxy and server for schema token compaction, $ref inlining, rug-pull pinning, and secret redaction.",
+  "version": "1.0.0",
   "repository": {
     "url": "https://github.com/SalyyS1/mcp-slim",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "pypi",
       "identifier": "mcp-slim",
-      "version": "0.9.0",
+      "version": "1.0.0",
       "transport": {
         "type": "stdio"
       },
