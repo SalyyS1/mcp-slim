@@ -10,13 +10,14 @@ import sys
 import time
 from typing import Any, Callable, Awaitable
 
-from .guard import SecretGuard
+from .guard import SecretGuard, StreamSanitizer, ToolCallStreamSanitizer
 from .slimmer import (
     LazyToolBroker,
     OutputSlimmer,
     ResourceUriGuard,
     SchemaSlimmer,
     SlimStats,
+    TokenWindowGovernor,
     ToolPinGuard,
     estimate_tokens,
 )
@@ -45,6 +46,9 @@ class MCPProxy:
       allow_resource_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
       deny_resource_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
       resource_guard: ResourceUriGuard | None = None,
+      token_budget: int = 0,
+      window_decay: float = 0.85,
+      window_governor: TokenWindowGovernor | None = None,
       otel_exporter: OTelSpanExporter | None = None,
       otel_jsonl_path: Path | str | None = None,
   ) -> None:
@@ -77,6 +81,17 @@ class MCPProxy:
             block_traversal=True,
         )
     )
+    self.window_governor = (
+        window_governor
+        if window_governor is not None
+        else (
+            self.output_slimmer.window_governor
+            if self.output_slimmer.window_governor is not None
+            else TokenWindowGovernor(budget_tokens=token_budget, decay=window_decay)
+        )
+    )
+    self._server_streams: dict[str, StreamSanitizer] = {}
+    self._client_tool_streams = ToolCallStreamSanitizer(guard=self.secret_guard)
     self.stats_ledger = (
         stats_ledger
         if stats_ledger is not None
@@ -491,6 +506,126 @@ class MCPProxy:
         self._pending_tool_names[msg_id] = resolved_tool_name
 
     red_req_before = self.secret_guard.report.total_redactions
+    if (
+        isinstance(method, str)
+        and method in ("notifications/tools/call_delta", "notifications/tools/input_delta", "tools/callStream")
+        and isinstance(params, dict)
+        and (isinstance(params.get("delta"), str) or isinstance(params.get("argumentsDelta"), str))
+    ):
+      delta_key = "delta" if isinstance(params.get("delta"), str) else "argumentsDelta"
+      call_id = params.get("callId") or params.get("streamId") or msg_id or "default"
+      t_name = params.get("name") if isinstance(params.get("name"), str) else None
+      eff_t_name = t_name or self._client_tool_streams.tool_name_for(call_id)
+      if eff_t_name:
+        quarantine_mut = self.pin_guard.get_quarantine(eff_t_name)
+        if quarantine_mut is not None:
+          self.stats.blocked_calls += 1
+          self.stats.rug_pulls_blocked += 1
+          self._client_tool_streams.discard_call(call_id)
+          pin_msg = (
+              f"[mcp-slim] Tool '{eff_t_name}' is quarantined by --pin-schemas: "
+              f"{quarantine_mut.message}"
+          )
+          if msg_id is not None:
+            pin_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": {
+                    "content": [{"type": "text", "text": pin_msg}],
+                    "isError": True,
+                },
+            }
+            self._local_responses.append(json.dumps(pin_payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.{method} {eff_t_name}",
+              kind="CLIENT",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=pin_msg,
+              attributes={
+                  "mcp.method.name": method,
+                  "mcp.tool.name": eff_t_name,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.rug_pull_quarantined": True,
+              },
+          )
+          return ""
+        if not self.schema_slimmer.is_tool_allowed(eff_t_name):
+          self.stats.blocked_calls += 1
+          self._client_tool_streams.discard_call(call_id)
+          reason_suffix = (
+              " (read-only mode active)"
+              if self.schema_slimmer.read_only_only
+              and not self.schema_slimmer.is_read_only_tool(eff_t_name)
+              else ""
+          )
+          block_msg = f"[mcp-slim] Tool '{eff_t_name}' is blocked by proxy allow/deny policy{reason_suffix}."
+          if msg_id is not None:
+            block_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": {
+                    "content": [{"type": "text", "text": block_msg}],
+                    "isError": True,
+                },
+            }
+            self._local_responses.append(json.dumps(block_payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.{method} {eff_t_name}",
+              kind="CLIENT",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=block_msg,
+              attributes={
+                  "mcp.method.name": method,
+                  "mcp.tool.name": eff_t_name,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+              },
+          )
+          return ""
+
+      safe_delta = self._client_tool_streams.push_delta(
+          call_id, params[delta_key], tool_name=t_name
+      )
+      self.stats.stream_chunks_sanitized += 1
+      if params.get("done") is True:
+        fin = self._client_tool_streams.finish_call(
+            call_id, schema_slimmer=self.schema_slimmer, stats=self.stats
+        )
+        final_tool_name = str(fin.get("tool_name") or eff_t_name or "")
+        if fin["validation_error"] is not None:
+          self.stats.blocked_calls += 1
+          if msg_id is not None:
+            err_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": {
+                    "content": [{"type": "text", "text": fin["validation_error"]}],
+                    "isError": True,
+                },
+            }
+            self._local_responses.append(json.dumps(err_payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+          return ""
+        if (
+            self.cache_ttl > 0.0
+            and final_tool_name
+            and not self.schema_slimmer.is_read_only_tool(final_tool_name)
+        ):
+          self._read_cache.clear()
+        params["arguments"] = fin["arguments"]
+        params.pop(delta_key, None)
+      else:
+        params[delta_key] = safe_delta
+      return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+
     if method in ("tools/call", "prompts/get") and isinstance(params, dict):
       if "arguments" in params:
         redacted_args = self.secret_guard.redact_value(params["arguments"])
@@ -510,6 +645,14 @@ class MCPProxy:
             "redactions_on_req": red_req_delta,
         }
       return serialized + "\n"
+
+    if msg_id is None and isinstance(params, dict) and self.secret_guard.enabled:
+      clean_cli_params = self.secret_guard.resolve_handles_in_value(
+          self.secret_guard.redact_value(params)
+      )
+      if clean_cli_params != params:
+        msg["params"] = clean_cli_params
+        return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
 
     if self.otel_exporter is not None and msg_id is not None and isinstance(method, str):
       self._inflight_spans[("client", msg_id)] = {
@@ -627,6 +770,65 @@ class MCPProxy:
       if msg_id is not None:
         self._pending_server_methods[msg_id] = srv_method
       if isinstance(srv_params, dict) and self.secret_guard.enabled:
+        stream_field: str | None = None
+        for cand in ("delta", "chunk"):
+          if isinstance(srv_params.get(cand), str):
+            stream_field = cand
+            break
+        has_bounded_progress = (
+            isinstance(srv_params.get("progress"), (int, float))
+            and isinstance(srv_params.get("total"), (int, float))
+            and float(srv_params["total"]) > 0
+        )
+        if (
+            stream_field is None
+            and isinstance(srv_params.get("message"), str)
+            and ("done" in srv_params or "final" in srv_params or "streamId" in srv_params or has_bounded_progress)
+        ):
+          stream_field = "message"
+
+        if stream_field is not None:
+          stream_key = str(
+              srv_params.get("streamId")
+              or srv_params.get("progressToken")
+              or srv_method
+          )
+          sanitizer = self._server_streams.get(stream_key)
+          if sanitizer is None:
+            while len(self._server_streams) >= 256:
+              oldest_key = next(iter(self._server_streams))
+              self._server_streams.pop(oldest_key, None)
+            sanitizer = StreamSanitizer(
+                self.secret_guard,
+                force_redact=not self.secret_guard.vault_handles,
+            )
+            self._server_streams[stream_key] = sanitizer
+          is_done = bool(
+              srv_params.get("done") is True
+              or srv_params.get("final") is True
+              or (
+                  has_bounded_progress
+                  and float(srv_params["progress"]) >= float(srv_params["total"])
+              )
+          )
+          emitted_chunk = sanitizer.push(srv_params[stream_field])
+          if is_done:
+            emitted_chunk += sanitizer.flush()
+            self._server_streams.pop(stream_key, None)
+          self.stats.stream_chunks_sanitized += 1
+          other_params = {
+              k: (
+                  emitted_chunk
+                  if k == stream_field
+                  else self.secret_guard.redact_value(
+                      v, force_redact=not self.secret_guard.vault_handles
+                  )
+              )
+              for k, v in srv_params.items()
+          }
+          msg["params"] = other_params
+          return json.dumps(msg, ensure_ascii=False, separators=(",", ":")) + "\n"
+
         red_before = self.secret_guard.report.total_redactions
         clean_params = self.secret_guard.redact_value(
             srv_params, force_redact=True
@@ -662,6 +864,7 @@ class MCPProxy:
       refs_0 = self.stats.refs_inlined
       red_0 = self.secret_guard.report.total_redactions
 
+      governed_turn = False
       if method == "tools/list" or isinstance(result.get("tools"), list):
         raw_tools = result.get("tools")
         if isinstance(raw_tools, list):
@@ -693,16 +896,28 @@ class MCPProxy:
             result["tools"] = slimmed_list
           self.stats.schema_tokens_before += orig_tok - sanitized_tok
       elif method == "tools/call" or isinstance(result.get("content"), list):
+        governed_turn = self.window_governor.enabled
         result = self.output_slimmer.slim_call_result(
-            result, stats=self.stats, guard=self.secret_guard
+            result,
+            stats=self.stats,
+            guard=self.secret_guard,
+            governor=self.window_governor,
         )
       elif method == "resources/read" or isinstance(result.get("contents"), list):
+        governed_turn = self.window_governor.enabled
         result = self.output_slimmer.slim_resource_result(
-            result, stats=self.stats, guard=self.secret_guard
+            result,
+            stats=self.stats,
+            guard=self.secret_guard,
+            governor=self.window_governor,
         )
       elif method == "prompts/get" or isinstance(result.get("messages"), list):
+        governed_turn = self.window_governor.enabled
         result = self.output_slimmer.slim_prompt_result(
-            result, stats=self.stats, guard=self.secret_guard
+            result,
+            stats=self.stats,
+            guard=self.secret_guard,
+            governor=self.window_governor,
         )
       elif method == "resources/list" or isinstance(result.get("resources"), list):
         raw_res = result.get("resources")
@@ -750,29 +965,37 @@ class MCPProxy:
         tok_b_delta = self.stats.total_tokens_before - tok_before_0
         tok_a_delta = self.stats.total_tokens_after - tok_after_0
         is_err = bool(result.get("isError"))
+        span_attrs: dict[str, Any] = {
+            "mcp.method.name": eff_method,
+            "mcp.tool.name": eff_tool,
+            "mcp.request.id": str(msg_id) if msg_id is not None else None,
+            "mcp_slim.tokens.before": tok_b_delta,
+            "mcp_slim.tokens.after": tok_a_delta,
+            "mcp_slim.tokens.saved": max(0, tok_b_delta - tok_a_delta),
+            "mcp_slim.wire_bytes.before": wire_in,
+            "mcp_slim.wire_bytes.after": wire_out,
+            "mcp_slim.refs_inlined": self.stats.refs_inlined - refs_0,
+            "mcp_slim.secrets_redacted": (
+                inflight_cli.get("redactions_on_req", 0)
+                + (self.secret_guard.report.total_redactions - red_0)
+            ),
+            "mcp_slim.cache_hit": False,
+            "mcp_slim.blocked": False,
+        }
+        if governed_turn and self.window_governor.last_decision is not None:
+          dec = self.window_governor.last_decision
+          span_attrs["mcp_slim.window_tokens"] = round(
+              self.window_governor.window_tokens, 2
+          )
+          span_attrs["mcp_slim.budget_pressure"] = dec.pressure
+          span_attrs["mcp_slim.budget_throttled"] = dec.throttled
         self._emit_span(
             name=span_name,
             kind="CLIENT",
             start_ns=inflight_cli["start_wall_ns"],
             end_ns=inflight_cli["start_wall_ns"] + elapsed_ns,
             is_error=is_err,
-            attributes={
-                "mcp.method.name": eff_method,
-                "mcp.tool.name": eff_tool,
-                "mcp.request.id": str(msg_id) if msg_id is not None else None,
-                "mcp_slim.tokens.before": tok_b_delta,
-                "mcp_slim.tokens.after": tok_a_delta,
-                "mcp_slim.tokens.saved": max(0, tok_b_delta - tok_a_delta),
-                "mcp_slim.wire_bytes.before": wire_in,
-                "mcp_slim.wire_bytes.after": wire_out,
-                "mcp_slim.refs_inlined": self.stats.refs_inlined - refs_0,
-                "mcp_slim.secrets_redacted": (
-                    inflight_cli.get("redactions_on_req", 0)
-                    + (self.secret_guard.report.total_redactions - red_0)
-                ),
-                "mcp_slim.cache_hit": False,
-                "mcp_slim.blocked": False,
-            },
+            attributes=span_attrs,
         )
 
       if isinstance(msg_id, str) and msg_id in self._bridge_waiters:

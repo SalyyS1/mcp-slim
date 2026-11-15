@@ -169,6 +169,8 @@ class SlimStats:
   rug_pulls_blocked: int = 0
   resources_blocked: int = 0
   tables_compacted: int = 0
+  budget_throttles: int = 0
+  stream_chunks_sanitized: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -1164,6 +1166,145 @@ class LazyToolBroker:
     }
 
 
+@dataclass(frozen=True)
+class WindowBudgetDecision:
+  """Per-turn compaction limits computed from the sliding exponential token window."""
+
+  max_string_chars: int
+  max_list_items: int
+  window_tokens_before: float
+  budget_tokens: int
+  pressure: float
+  scale_factor: float
+  throttled: bool
+
+
+class TokenWindowGovernor:
+  """Exponentially decaying sliding token-window budget governor (`--token-budget`).
+
+  Maintains `W_t = decay * W_{t-1} + emitted_{t-1}` across sequential MCP outputs and
+  smoothly tightens `OutputSlimmer` character and list budgets as `W_t / budget_tokens`
+  rises, preventing context-window blowouts on long-horizon agent loops while naturally
+  recovering capacity when subsequent turns emit light outputs.
+  """
+
+  def __init__(
+      self,
+      budget_tokens: int = 0,
+      *,
+      decay: float = 0.85,
+      min_scale: float = 0.15,
+      min_string_chars: int = 240,
+      min_list_items: int = 3,
+      initial_window_tokens: float = 0.0,
+  ) -> None:
+    self.budget_tokens = max(0, int(budget_tokens))
+    self.enabled = self.budget_tokens > 0
+    self.decay = min(1.0, max(0.0, float(decay)))
+    self.min_scale = min(1.0, max(0.05, float(min_scale)))
+    self.min_string_chars = max(80, int(min_string_chars))
+    self.min_list_items = max(1, int(min_list_items))
+    self.window_tokens: float = max(0.0, float(initial_window_tokens))
+    self.turns: int = 0
+    self.throttled_turns: int = 0
+    self.last_decision: WindowBudgetDecision | None = None
+
+  def reset(self) -> None:
+    self.window_tokens = 0.0
+    self.turns = 0
+    self.throttled_turns = 0
+    self.last_decision = None
+
+  def plan_turn(
+      self, base_max_chars: int, base_max_items: int
+  ) -> WindowBudgetDecision:
+    if not self.enabled or self.budget_tokens <= 0:
+      decision = WindowBudgetDecision(
+          max_string_chars=base_max_chars,
+          max_list_items=base_max_items,
+          window_tokens_before=self.window_tokens,
+          budget_tokens=0,
+          pressure=0.0,
+          scale_factor=1.0,
+          throttled=False,
+      )
+      self.last_decision = decision
+      return decision
+
+    pressure = self.window_tokens / float(self.budget_tokens)
+    if pressure <= 0.4:
+      scale = 1.0
+    elif pressure >= 1.0:
+      scale = self.min_scale
+    else:
+      norm_x = (pressure - 0.4) / 0.6
+      scale = math.exp(math.log(self.min_scale) * norm_x)
+
+    eff_min_chars = min(base_max_chars, self.min_string_chars)
+    eff_min_items = min(base_max_items, self.min_list_items)
+    if pressure <= 0.4:
+      headroom_chars = max(eff_min_chars, self.budget_tokens * 4)
+    else:
+      remaining_tokens = max(0, self.budget_tokens - int(round(self.window_tokens)))
+      headroom_chars = max(eff_min_chars, remaining_tokens * 4)
+
+    scaled_chars = int(round(base_max_chars * scale))
+    target_chars = max(eff_min_chars, min(base_max_chars, scaled_chars, headroom_chars))
+
+    if pressure >= 1.0:
+      target_items = eff_min_items
+    else:
+      target_items = max(
+          eff_min_items, min(base_max_items, int(round(base_max_items * scale)))
+      )
+
+    throttled = (target_chars < base_max_chars) or (target_items < base_max_items)
+    decision = WindowBudgetDecision(
+        max_string_chars=target_chars,
+        max_list_items=target_items,
+        window_tokens_before=round(self.window_tokens, 2),
+        budget_tokens=self.budget_tokens,
+        pressure=round(pressure, 4),
+        scale_factor=round(scale, 4),
+        throttled=throttled,
+    )
+    self.last_decision = decision
+    return decision
+
+  def record_turn(
+      self,
+      emitted_tokens: int,
+      *,
+      throttled: bool = False,
+      stats: SlimStats | None = None,
+  ) -> float:
+    if not self.enabled:
+      return 0.0
+    self.turns += 1
+    if throttled:
+      self.throttled_turns += 1
+      if stats is not None:
+        stats.budget_throttles += 1
+    self.window_tokens = (self.window_tokens * self.decay) + max(0, int(emitted_tokens))
+    return self.window_tokens
+
+  def snapshot(self) -> dict[str, Any]:
+    pressure = (
+        round(self.window_tokens / float(self.budget_tokens), 4)
+        if self.enabled and self.budget_tokens > 0
+        else 0.0
+    )
+    return {
+        "enabled": self.enabled,
+        "budget_tokens": self.budget_tokens,
+        "decay": self.decay,
+        "window_tokens": round(self.window_tokens, 2),
+        "pressure": pressure,
+        "turns": self.turns,
+        "throttled_turns": self.throttled_turns,
+    }
+
+
 class OutputSlimmer:
   """Compacts verbose `tools/call` outputs (JSON blobs, logs, ANSI sequences)."""
 
@@ -1176,6 +1317,7 @@ class OutputSlimmer:
       flatten_resources: bool = True,
       tabular_arrays: bool = False,
       min_table_rows: int = 4,
+      window_governor: TokenWindowGovernor | None = None,
   ) -> None:
     self.max_list_items = max_list_items
     self.max_string_chars = max_string_chars
@@ -1184,6 +1326,7 @@ class OutputSlimmer:
     self.flatten_resources = flatten_resources
     self.tabular_arrays = tabular_arrays
     self.min_table_rows = max(2, min_table_rows)
+    self.window_governor = window_governor
 
   @staticmethod
   def _is_scalar_cell(val: Any) -> bool:
@@ -1423,89 +1566,136 @@ class OutputSlimmer:
       result: dict[str, Any],
       stats: SlimStats | None = None,
       guard: Any | None = None,
+      *,
+      governor: TokenWindowGovernor | None = None,
   ) -> dict[str, Any]:
-    before_tokens = estimate_tokens(result) if stats is not None else 0
-    out = dict(result)
-    content = out.get("content")
-    if isinstance(content, list):
-      new_content: list[Any] = []
-      for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-          text = item.get("text")
-          if isinstance(text, str):
-            item = {
-                **item,
-                "text": self.slim_text(text, stats=stats, guard=guard),
-            }
-        elif (
-            isinstance(item, dict)
-            and item.get("type") == "resource"
-            and isinstance(item.get("resource"), dict)
-        ):
-          res = item["resource"]
-          if guard is not None and isinstance(res.get("blob"), str):
-            res = guard.redact_value(res)
-          res_text = res.get("text")
-          if isinstance(res_text, str):
-            slimmed_res = self.slim_text(res_text, stats=stats, guard=guard)
-            if self.flatten_resources:
-              uri = res.get("uri")
-              header = f"[Resource: {uri}]\n" if isinstance(uri, str) and uri else ""
-              item = {"type": "text", "text": f"{header}{slimmed_res}"}
-            else:
-              item = {**item, "resource": {**res, "text": slimmed_res}}
-          elif res is not item["resource"]:
-            item = {**item, "resource": res}
-        new_content.append(item)
-      out["content"] = new_content
-    if "structuredContent" in out and isinstance(
-        out["structuredContent"], (dict, list)
-    ):
-      sc_val = (
-          guard.redact_value(out["structuredContent"])
-          if guard is not None
-          else out["structuredContent"]
+    eff_gov = governor if governor is not None else self.window_governor
+    orig_chars = self.max_string_chars
+    orig_items = self.max_list_items
+    decision = (
+        eff_gov.plan_turn(orig_chars, orig_items)
+        if eff_gov is not None and eff_gov.enabled
+        else None
+    )
+    if decision is not None:
+      self.max_string_chars = decision.max_string_chars
+      self.max_list_items = decision.max_list_items
+    try:
+      before_tokens = estimate_tokens(result) if stats is not None else 0
+      out = dict(result)
+      content = out.get("content")
+      if isinstance(content, list):
+        new_content: list[Any] = []
+        for item in content:
+          if isinstance(item, dict) and item.get("type") == "text":
+            text = item.get("text")
+            if isinstance(text, str):
+              item = {
+                  **item,
+                  "text": self.slim_text(text, stats=stats, guard=guard),
+              }
+          elif (
+              isinstance(item, dict)
+              and item.get("type") == "resource"
+              and isinstance(item.get("resource"), dict)
+          ):
+            res = item["resource"]
+            if guard is not None and isinstance(res.get("blob"), str):
+              res = guard.redact_value(res)
+            res_text = res.get("text")
+            if isinstance(res_text, str):
+              slimmed_res = self.slim_text(res_text, stats=stats, guard=guard)
+              if self.flatten_resources:
+                uri = res.get("uri")
+                header = f"[Resource: {uri}]\n" if isinstance(uri, str) and uri else ""
+                item = {"type": "text", "text": f"{header}{slimmed_res}"}
+              else:
+                item = {**item, "resource": {**res, "text": slimmed_res}}
+            elif res is not item["resource"]:
+              item = {**item, "resource": res}
+          new_content.append(item)
+        out["content"] = new_content
+      if "structuredContent" in out and isinstance(
+          out["structuredContent"], (dict, list)
+      ):
+        sc_val = (
+            guard.redact_value(out["structuredContent"])
+            if guard is not None
+            else out["structuredContent"]
+        )
+        compacted_sc = self.compact_json_value(sc_val, stats=stats)
+        if compacted_sc in (None, {}, []):
+          out.pop("structuredContent", None)
+        else:
+          out["structuredContent"] = compacted_sc
+      after_tokens = (
+          estimate_tokens(out)
+          if (stats is not None or decision is not None)
+          else 0
       )
-      compacted_sc = self.compact_json_value(sc_val, stats=stats)
-      if compacted_sc in (None, {}, []):
-        out.pop("structuredContent", None)
-      else:
-        out["structuredContent"] = compacted_sc
-    if stats is not None:
-      after_tokens = estimate_tokens(out)
-      stats.output_tokens_before += before_tokens
-      stats.output_tokens_after += after_tokens
-    return out
+      if stats is not None:
+        stats.output_tokens_before += before_tokens
+        stats.output_tokens_after += after_tokens
+      if eff_gov is not None and decision is not None:
+        eff_gov.record_turn(after_tokens, throttled=decision.throttled, stats=stats)
+      return out
+    finally:
+      self.max_string_chars = orig_chars
+      self.max_list_items = orig_items
 
   def slim_resource_result(
       self,
       result: dict[str, Any],
       stats: SlimStats | None = None,
       guard: Any | None = None,
+      *,
+      governor: TokenWindowGovernor | None = None,
   ) -> dict[str, Any]:
     """Compacts MCP `resources/read` payloads (`result.contents[*].text` and UTF-8 `blob`)."""
     contents = result.get("contents")
     if not isinstance(contents, list):
       return result
-    before_tokens = estimate_tokens(result) if stats is not None else 0
-    new_contents: list[Any] = []
-    for item in contents:
-      if isinstance(item, dict):
-        cur = dict(item)
-        if guard is not None and isinstance(cur.get("blob"), str):
-          cur["blob"] = guard.redact_base64_blob(
-              cur["blob"],
-              mime_type=cur.get("mimeType") if isinstance(cur.get("mimeType"), str) else None,
-          )
-        if isinstance(cur.get("text"), str):
-          cur["text"] = self.slim_text(cur["text"], stats=stats, guard=guard)
-        item = cur
-      new_contents.append(item)
-    out = {**result, "contents": new_contents}
-    if stats is not None:
-      stats.output_tokens_before += before_tokens
-      stats.output_tokens_after += estimate_tokens(out)
-    return out
+    eff_gov = governor if governor is not None else self.window_governor
+    orig_chars = self.max_string_chars
+    orig_items = self.max_list_items
+    decision = (
+        eff_gov.plan_turn(orig_chars, orig_items)
+        if eff_gov is not None and eff_gov.enabled
+        else None
+    )
+    if decision is not None:
+      self.max_string_chars = decision.max_string_chars
+      self.max_list_items = decision.max_list_items
+    try:
+      before_tokens = estimate_tokens(result) if stats is not None else 0
+      new_contents: list[Any] = []
+      for item in contents:
+        if isinstance(item, dict):
+          cur = dict(item)
+          if guard is not None and isinstance(cur.get("blob"), str):
+            cur["blob"] = guard.redact_base64_blob(
+                cur["blob"],
+                mime_type=cur.get("mimeType") if isinstance(cur.get("mimeType"), str) else None,
+            )
+          if isinstance(cur.get("text"), str):
+            cur["text"] = self.slim_text(cur["text"], stats=stats, guard=guard)
+          item = cur
+        new_contents.append(item)
+      out = {**result, "contents": new_contents}
+      after_tokens = (
+          estimate_tokens(out)
+          if (stats is not None or decision is not None)
+          else 0
+      )
+      if stats is not None:
+        stats.output_tokens_before += before_tokens
+        stats.output_tokens_after += after_tokens
+      if eff_gov is not None and decision is not None:
+        eff_gov.record_turn(after_tokens, throttled=decision.throttled, stats=stats)
+      return out
+    finally:
+      self.max_string_chars = orig_chars
+      self.max_list_items = orig_items
 
   def _slim_prompt_part(
       self,
@@ -1547,41 +1737,64 @@ class OutputSlimmer:
       guard: Any | None = None,
       *,
       force_redact: bool = False,
+      governor: TokenWindowGovernor | None = None,
   ) -> dict[str, Any]:
     """Compacts MCP `prompts/get` payloads (`result.messages[*].content`)."""
     messages = result.get("messages")
     if not isinstance(messages, list):
       return result
-    before_tokens = estimate_tokens(result) if stats is not None else 0
-    new_messages: list[Any] = []
-    for msg in messages:
-      if not isinstance(msg, dict):
+    eff_gov = governor if governor is not None else self.window_governor
+    orig_chars = self.max_string_chars
+    orig_items = self.max_list_items
+    decision = (
+        eff_gov.plan_turn(orig_chars, orig_items)
+        if eff_gov is not None and eff_gov.enabled
+        else None
+    )
+    if decision is not None:
+      self.max_string_chars = decision.max_string_chars
+      self.max_list_items = decision.max_list_items
+    try:
+      before_tokens = estimate_tokens(result) if stats is not None else 0
+      new_messages: list[Any] = []
+      for msg in messages:
+        if not isinstance(msg, dict):
+          new_messages.append(msg)
+          continue
+        content = msg.get("content")
+        if isinstance(content, dict):
+          msg = {
+              **msg,
+              "content": self._slim_prompt_part(
+                  content, stats=stats, guard=guard, force_redact=force_redact
+              ),
+          }
+        elif isinstance(content, list):
+          msg = {
+              **msg,
+              "content": [
+                  self._slim_prompt_part(
+                      p, stats=stats, guard=guard, force_redact=force_redact
+                  )
+                  for p in content
+              ],
+          }
         new_messages.append(msg)
-        continue
-      content = msg.get("content")
-      if isinstance(content, dict):
-        msg = {
-            **msg,
-            "content": self._slim_prompt_part(
-                content, stats=stats, guard=guard, force_redact=force_redact
-            ),
-        }
-      elif isinstance(content, list):
-        msg = {
-            **msg,
-            "content": [
-                self._slim_prompt_part(
-                    p, stats=stats, guard=guard, force_redact=force_redact
-                )
-                for p in content
-            ],
-        }
-      new_messages.append(msg)
-    out = {**result, "messages": new_messages}
-    if stats is not None:
-      stats.output_tokens_before += before_tokens
-      stats.output_tokens_after += estimate_tokens(out)
-    return out
+      out = {**result, "messages": new_messages}
+      after_tokens = (
+          estimate_tokens(out)
+          if (stats is not None or decision is not None)
+          else 0
+      )
+      if stats is not None:
+        stats.output_tokens_before += before_tokens
+        stats.output_tokens_after += after_tokens
+      if eff_gov is not None and decision is not None:
+        eff_gov.record_turn(after_tokens, throttled=decision.throttled, stats=stats)
+      return out
+    finally:
+      self.max_string_chars = orig_chars
+      self.max_list_items = orig_items
 
 
 AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
@@ -2363,7 +2576,7 @@ def audit_resources_manifest(
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.1.0",
+    version: str = "1.2.0",
 ) -> dict[str, Any]:
   """Formats an `audit_tools_manifest`, `diff_tools_manifests`, or `audit_resources_manifest` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []

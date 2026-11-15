@@ -235,10 +235,12 @@ class TestMcpSlimV070(unittest.TestCase):
         tool_names,
         {
             "compact_mcp_tools",
+            "compact_mcp_output",
             "audit_mcp_schema",
             "diff_mcp_tools",
             "audit_mcp_resources",
             "redact_secrets",
+            "sanitize_stream_chunks",
             "get_slim_stats",
         },
     )

@@ -34,6 +34,8 @@ COUNTER_KEYS: tuple[str, ...] = (
     "rug_pulls_blocked",
     "resources_blocked",
     "tables_compacted",
+    "budget_throttles",
+    "stream_chunks_sanitized",
     "secrets_redacted",
 )
 
@@ -433,6 +435,8 @@ class StatsLedger:
       rug_pulls_blocked: int = 0,
       resources_blocked: int = 0,
       tables_compacted: int = 0,
+      budget_throttles: int = 0,
+      stream_chunks_sanitized: int = 0,
   ) -> dict[str, Any]:
     """Records one proxy session into the cumulative ledger without ever raising."""
     if not self.enabled or is_stats_disabled_by_env():
@@ -499,6 +503,14 @@ class StatsLedger:
           "tables_compacted": (
               (stats.tables_compacted if stats is not None else 0)
               + tables_compacted
+          ),
+          "budget_throttles": (
+              (stats.budget_throttles if stats is not None else 0)
+              + budget_throttles
+          ),
+          "stream_chunks_sanitized": (
+              (stats.stream_chunks_sanitized if stats is not None else 0)
+              + stream_chunks_sanitized
           ),
           "secrets_redacted": max(0, int(secrets_redacted)),
       }
@@ -668,6 +680,10 @@ class StatsLedger:
         (
             f"  Rug-Pulls Quarantined       : {info['rug_pulls_blocked']:<10,}"
             f"  Resources Blocked   : {info['resources_blocked']:,}"
+        ),
+        (
+            f"  Window Budget Throttles     : {info['budget_throttles']:<10,}"
+            f"  Stream Chunks Clean : {info['stream_chunks_sanitized']:,}"
         ),
         "=" * 78,
         (

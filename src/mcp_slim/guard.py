@@ -7,6 +7,7 @@ import binascii
 from dataclasses import dataclass, field
 import hashlib
 import hmac
+import json
 import re
 import secrets
 from typing import Any
@@ -151,7 +152,7 @@ _SECRET_RULES: tuple[tuple[str, tuple[str, ...], bool, re.Pattern[str], str], ..
         ),
         True,
         re.compile(
-            r"(?i)((?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?(?!\[(?:REDACTED|SECRET_REF):))([^\s'\",;}{]{8,})(['\"]?)"
+            r"(?i)((?<!\[SECRET_REF:)(?<!\[REDACTED:)\b[A-Za-z0-9_]*(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?(?!\[(?:REDACTED|SECRET_REF):))([^\s'\",;}{\]]{8,})(['\"]?)"
         ),
         r"\1[REDACTED:ENV_SECRET]\3",
     ),
@@ -247,6 +248,30 @@ _BINARY_MIME_PREFIXES = (
 _MAX_INSPECT_BLOB_CHARS = 2_800_000
 
 _SECRET_HANDLE_PATTERN = re.compile(r"\[SECRET_REF:[a-z0-9_]+:[0-9a-f]{10}\]")
+
+_STREAM_OPEN_XML_TAG_RE = re.compile(
+    r"(?i)<(important|system-reminder|system|instruction|tool_call|function_call)\b[^>]*>"
+)
+_STREAM_CHATML_OPEN_RE = re.compile(r"(?i)<\|im_start\|>\s*(?:system|developer)\b")
+_STREAM_SYS_PIPE_OPEN_RE = re.compile(r"(?i)<\|system\|>")
+_STREAM_LLAMA3_SYS_OPEN_RE = re.compile(
+    r"(?i)<\|start_header_id\|>\s*system\s*<\|end_header_id\|>"
+)
+_STREAM_LLAMA2_SYS_OPEN_RE = re.compile(r"(?i)<<sys>>")
+_STREAM_PEM_END_RE = re.compile(
+    r"-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+)
+_STREAM_LINE_DIRECTIVE_DOT_RE = re.compile(
+    r"(?i)(?:(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|system)\s+"
+    r"(?:instructions|prompts|directives|rules)|you\s+are\s+now\s+in\s+developer\s+mode)"
+)
+_STREAM_LINE_DIRECTIVE_COLON_RE = re.compile(
+    r"(?i)(?:new|override|updated)\s+system\s+(?:instructions|prompt)\s*:"
+)
+_STREAM_ENV_PREFIX_RE = re.compile(
+    r"(?i)(?:API_KEY|SECRET_KEY|ACCESS_TOKEN|PRIVATE_KEY|AUTH_TOKEN|CLIENT_SECRET|"
+    r"DB_PASSWORD|DATABASE_PASSWORD)\s*[:=]\s*['\"]?$"
+)
 
 
 @dataclass
@@ -415,3 +440,430 @@ class SecretGuard:
     if isinstance(value, dict):
       return {k: self.resolve_handles_in_value(v) for k, v in value.items()}
     return value
+
+
+class StreamSanitizer:
+  """Stateful O(N) chunk-boundary sanitizer for streaming MCP tool calls and notifications.
+
+  Holds back trailing open tokens, incomplete `[SECRET_REF:...]` handles, unclosed PEM
+  blocks, and multi-chunk prompt-injection tags up to `max_buffer_chars` so secrets or
+  injections split across arbitrary byte/chunk boundaries never leak.
+  """
+
+  def __init__(
+      self,
+      guard: SecretGuard | None = None,
+      *,
+      overlap_chars: int = 160,
+      max_buffer_chars: int = 8192,
+      force_redact: bool = False,
+      resolve_handles: bool = False,
+  ) -> None:
+    self.guard = guard if guard is not None else SecretGuard()
+    self.overlap_chars = max(32, int(overlap_chars))
+    self.max_buffer_chars = max(self.overlap_chars * 2, int(max_buffer_chars))
+    self.force_redact = force_redact
+    self.resolve_handles = resolve_handles
+    self._carry: str = ""
+    self._overflow_close_re: re.Pattern[str] | None = None
+    self.chunks_processed: int = 0
+
+  @property
+  def buffered_chars(self) -> int:
+    return len(self._carry)
+
+  def reset(self) -> None:
+    self._carry = ""
+    self._overflow_close_re = None
+
+  def _post_process(self, text: str) -> str:
+    if not text:
+      return ""
+    out = self.guard.redact_text(text, force_redact=self.force_redact)
+    if self.resolve_handles and not self.force_redact:
+      out = self.guard.resolve_handles_in_text(out)
+    return out
+
+  @staticmethod
+  def _find_open_construct(
+      text: str,
+  ) -> tuple[int | None, re.Pattern[str] | None]:
+    """Finds the earliest unclosed multi-token secret, handle, or injection construct."""
+    earliest: int | None = None
+    close_re: re.Pattern[str] | None = None
+
+    def _consider(pos: int, closer: re.Pattern[str] | None = None) -> None:
+      nonlocal earliest, close_re
+      if earliest is None or pos < earliest:
+        earliest = pos
+        close_re = closer
+
+    # 1. XML-style prompt-injection blocks (<SYSTEM>, <IMPORTANT>, <TOOL_CALL>, ...)
+    for m in _STREAM_OPEN_XML_TAG_RE.finditer(text):
+      tag_name = m.group(1)
+      closer = re.compile(rf"(?i)</{re.escape(tag_name)}\s*>")
+      if closer.search(text, m.end()) is None:
+        _consider(m.start(), closer)
+        break
+
+    # 2. ChatML / Llama / pipe system role headers
+    for open_re, closer in (
+        (_STREAM_CHATML_OPEN_RE, re.compile(r"(?i)<\|im_end\|>")),
+        (_STREAM_SYS_PIPE_OPEN_RE, re.compile(r"(?i)<\|(?:end|endoftext)\|>")),
+        (_STREAM_LLAMA3_SYS_OPEN_RE, re.compile(r"(?i)<\|eot_id\|>")),
+        (_STREAM_LLAMA2_SYS_OPEN_RE, re.compile(r"(?i)<</sys>>")),
+    ):
+      for m in open_re.finditer(text):
+        if closer.search(text, m.end()) is None:
+          _consider(m.start(), closer)
+          break
+
+    # 3. Incomplete opening angle-bracket tag near end of buffer (e.g. `<SYST` or `<|im_`)
+    last_lt = text.rfind("<")
+    if last_lt != -1 and ">" not in text[last_lt:] and "\n" not in text[last_lt:]:
+      _consider(last_lt, None)
+
+    # 4. Multi-line PEM private key block
+    last_begin = text.rfind("-----BEGIN ")
+    if last_begin != -1 and _STREAM_PEM_END_RE.search(text, last_begin + 11) is None:
+      _consider(last_begin, None)
+
+    # 5. Single-line prompt-injection directives not yet terminated by newline/period/quote
+    last_nl = text.rfind("\n")
+    line_start = last_nl + 1
+    last_line = text[line_start:]
+    if last_line:
+      norm_line = _ASCII_ZW_SPLIT_RE.sub("", _UNICODE_SMUGGLING_RE.sub("", last_line))
+      for m in _STREAM_LINE_DIRECTIVE_DOT_RE.finditer(norm_line):
+        tail = norm_line[m.end() :]
+        if "\n" not in tail and "." not in tail and '"' not in tail:
+          _consider(line_start, re.compile(r'[\n."]'))
+          break
+      for m in _STREAM_LINE_DIRECTIVE_COLON_RE.finditer(norm_line):
+        tail = norm_line[m.end() :]
+        if "\n" not in tail and '"' not in tail:
+          _consider(line_start, re.compile(r'[\n"]'))
+          break
+
+    # 6. Unclosed Markdown image beacon `![alt](https://...` on current line
+    last_img = text.rfind("![")
+    if last_img != -1 and ")" not in text[last_img:] and "\n" not in text[last_img:]:
+      _consider(last_img, None)
+
+    # 7. Unclosed `[SECRET_REF:...]` or `[INST]` bracket token on current line
+    last_brk = text.rfind("[")
+    if last_brk != -1 and "]" not in text[last_brk:] and "\n" not in text[last_brk:]:
+      _consider(last_brk, None)
+
+    return earliest, close_re
+
+  @staticmethod
+  def _snap_to_safe_boundary(text: str, limit: int, overlap_chars: int) -> int:
+    """Snaps `limit` backwards to a clean newline (or token delimiter on long lines)."""
+    if limit <= 0:
+      return 0
+    nl_pos = text.rfind("\n", 0, limit)
+    if nl_pos != -1:
+      return nl_pos + 1
+    if len(text) <= max(512, overlap_chars * 3):
+      return 0
+
+    idx = limit
+    while idx > 0:
+      ch = text[idx - 1]
+      if ch in (" ", "\t", "\n", "\r", ","):
+        prefix = text[max(0, idx - 40) : idx]
+        if _STREAM_ENV_PREFIX_RE.search(prefix) is not None:
+          idx -= 1
+          continue
+        return idx
+      # Do not split across ASCII + zero-width joiner boundaries
+      idx -= 1
+    return 0
+
+  def _avoid_splitting_complete_match(self, text: str, cut: int) -> int:
+    """If any secret, handle, or injection match straddles `cut`, pulls `cut` back to `m.start()`."""
+    if cut <= 0 or cut >= len(text):
+      return cut
+    adjusted = cut
+    text_lower = text.lower()
+    for _, triggers, case_insensitive, pattern, _ in _SECRET_RULES:
+      haystack = text_lower if case_insensitive else text
+      if not any(t in haystack for t in triggers):
+        continue
+      for m in pattern.finditer(text):
+        if m.start() < adjusted < m.end():
+          adjusted = m.start()
+          break
+    if "[SECRET_REF:" in text:
+      for m in _SECRET_HANDLE_PATTERN.finditer(text):
+        if m.start() < adjusted < m.end():
+          adjusted = m.start()
+          break
+    return adjusted
+
+  def push(self, chunk: str) -> str:
+    """Ingests one streaming text chunk and returns the prefix guaranteed safe to emit."""
+    if not chunk:
+      return ""
+    self.chunks_processed += 1
+    if not self.guard.enabled:
+      return chunk
+
+    combined = self._carry + chunk
+
+    # If currently discarding an oversized unclosed prompt-injection block, look for its closer
+    if self._overflow_close_re is not None:
+      m_close = self._overflow_close_re.search(combined)
+      if m_close is None:
+        self._carry = combined[-64:] if len(combined) > 64 else combined
+        return ""
+      combined = combined[m_close.end() :]
+      self._overflow_close_re = None
+      self._carry = ""
+      if not combined:
+        return ""
+
+    open_idx, closer_re = self._find_open_construct(combined)
+    if open_idx is not None:
+      span_len = len(combined) - open_idx
+      if span_len <= self.max_buffer_chars:
+        if open_idx == 0:
+          self._carry = combined
+          return ""
+        safe_cut = self._snap_to_safe_boundary(
+            combined, min(open_idx, max(0, len(combined) - self.overlap_chars)), self.overlap_chars
+        )
+        safe_cut = self._avoid_splitting_complete_match(combined, safe_cut)
+        if safe_cut <= 0:
+          self._carry = combined
+          return ""
+        emitted = self._post_process(combined[:safe_cut])
+        self._carry = combined[safe_cut:]
+        return emitted
+
+      # Unclosed injection construct exceeded max_buffer_chars: redact immediately & stay in shield mode
+      if closer_re is not None:
+        prefix_out = self._post_process(combined[:open_idx]) if open_idx > 0 else ""
+        # Record smuggling inside the overflowed injection chunk before entering shield mode
+        in_block = combined[open_idx:]
+        if not in_block.isascii():
+          _, smug_c = _UNICODE_SMUGGLING_RE.subn("", in_block)
+          _, zw_c = _ASCII_ZW_SPLIT_RE.subn("", in_block)
+          if smug_c + zw_c:
+            self.guard.report.record("unicode_smuggling", smug_c + zw_c)
+        self.guard.report.record("prompt_injection", 1)
+        self._overflow_close_re = closer_re
+        self._carry = combined[-64:] if len(combined) > 64 else combined
+        return f"{prefix_out}[REDACTED:PROMPT_INJECTION]"
+
+    if len(combined) <= self.overlap_chars:
+      self._carry = combined
+      return ""
+
+    raw_limit = len(combined) - self.overlap_chars
+    safe_cut = self._snap_to_safe_boundary(combined, raw_limit, self.overlap_chars)
+    safe_cut = self._avoid_splitting_complete_match(combined, safe_cut)
+    if safe_cut <= 0:
+      if len(combined) <= self.max_buffer_chars:
+        self._carry = combined
+        return ""
+      safe_cut = raw_limit
+
+    emitted = self._post_process(combined[:safe_cut])
+    self._carry = combined[safe_cut:]
+    return emitted
+
+  def flush(self) -> str:
+    """Flushes any remaining buffered characters at the end of a stream."""
+    if self._overflow_close_re is not None:
+      if not self._carry.isascii():
+        _, smug_c = _UNICODE_SMUGGLING_RE.subn("", self._carry)
+        _, zw_c = _ASCII_ZW_SPLIT_RE.subn("", self._carry)
+        if smug_c + zw_c:
+          self.guard.report.record("unicode_smuggling", smug_c + zw_c)
+      self._carry = ""
+      self._overflow_close_re = None
+      return ""
+    rem = self._carry
+    self._carry = ""
+    if not rem:
+      return ""
+    if not self.guard.enabled:
+      return rem
+    return self._post_process(rem)
+
+
+class ToolCallStreamSanitizer:
+  """Sanitizes incremental LLM/MCP streaming tool-call JSON argument deltas (`tools/call`).
+
+  Reassembles fragmented JSON argument chunks per `call_id`, scrubs cross-chunk secrets
+  and prompt injections, resolves split `[SECRET_REF:...]` vault handles, and validates
+  decoded JSON arguments (including `\\uXXXX`-escaped sequences) upon completion.
+  """
+
+  def __init__(
+      self,
+      guard: SecretGuard | None = None,
+      *,
+      overlap_chars: int = 160,
+      max_call_chars: int = 262_144,
+      max_active_calls: int = 256,
+  ) -> None:
+    self.guard = guard if guard is not None else SecretGuard()
+    self.overlap_chars = overlap_chars
+    self.max_call_chars = max(1024, int(max_call_chars))
+    self.max_active_calls = max(8, int(max_active_calls))
+    self._calls: dict[str | int, dict[str, Any]] = {}
+    self.deltas_processed: int = 0
+    self.calls_completed: int = 0
+
+  @property
+  def active_calls(self) -> int:
+    return len(self._calls)
+
+  def tool_name_for(self, call_id: str | int) -> str:
+    state = self._calls.get(call_id)
+    if state is None:
+      return ""
+    return str(state.get("tool_name") or "")
+
+  def discard_call(self, call_id: str | int) -> None:
+    self._calls.pop(call_id, None)
+
+  def start_call(self, call_id: str | int, tool_name: str = "") -> None:
+    if call_id not in self._calls:
+      while len(self._calls) >= self.max_active_calls:
+        oldest_id = next(iter(self._calls))
+        self._calls.pop(oldest_id, None)
+    self._calls[call_id] = {
+        "tool_name": tool_name,
+        "sanitizer": StreamSanitizer(
+            self.guard,
+            overlap_chars=self.overlap_chars,
+            resolve_handles=self.guard.vault_handles,
+        ),
+        "parts": [],
+        "raw_chars": 0,
+        "overflowed": False,
+    }
+
+  def push_delta(
+      self,
+      call_id: str | int,
+      arguments_delta: str,
+      *,
+      tool_name: str | None = None,
+  ) -> str:
+    """Feeds an argument JSON delta chunk for `call_id` and returns any safe sanitized delta."""
+    state = self._calls.get(call_id)
+    if state is None:
+      self.start_call(call_id, tool_name=tool_name or "")
+      state = self._calls[call_id]
+    elif tool_name and not state["tool_name"]:
+      state["tool_name"] = tool_name
+
+    if not arguments_delta or state["overflowed"]:
+      return ""
+
+    self.deltas_processed += 1
+    if state["raw_chars"] + len(arguments_delta) > self.max_call_chars:
+      state["overflowed"] = True
+      state["parts"].clear()
+      state["sanitizer"].reset()
+      return ""
+
+    state["raw_chars"] += len(arguments_delta)
+    safe_delta = state["sanitizer"].push(arguments_delta)
+    if safe_delta:
+      state["parts"].append(safe_delta)
+    return safe_delta
+
+  def finish_call(
+      self,
+      call_id: str | int,
+      *,
+      schema_slimmer: Any | None = None,
+      stats: Any | None = None,
+  ) -> dict[str, Any]:
+    """Flushes `call_id`, decodes JSON, scrubs decoded values/escapes, and coerces/validates."""
+    state = self._calls.pop(call_id, None)
+    if state is None:
+      return {
+          "call_id": call_id,
+          "tool_name": "",
+          "arguments": {},
+          "sanitized_json": "{}",
+          "is_valid_json": True,
+          "validation_error": None,
+      }
+
+    tool_name = str(state["tool_name"] or "")
+    if state["overflowed"]:
+      return {
+          "call_id": call_id,
+          "tool_name": tool_name,
+          "arguments": None,
+          "sanitized_json": "",
+          "is_valid_json": False,
+          "validation_error": (
+              f"[mcp-slim] Streaming tool-call arguments for '{tool_name or call_id}' "
+              f"exceeded max_call_chars ({self.max_call_chars})."
+          ),
+      }
+
+    tail = state["sanitizer"].flush()
+    if tail:
+      state["parts"].append(tail)
+    assembled = "".join(state["parts"]).strip()
+    self.calls_completed += 1
+
+    if not assembled:
+      parsed: Any = {}
+    else:
+      try:
+        parsed = json.loads(assembled)
+      except json.JSONDecodeError as exc:
+        return {
+            "call_id": call_id,
+            "tool_name": tool_name,
+            "arguments": None,
+            "sanitized_json": assembled,
+            "is_valid_json": False,
+            "validation_error": f"Malformed tool-call arguments JSON: {exc.msg}",
+        }
+
+    if not isinstance(parsed, dict):
+      return {
+          "call_id": call_id,
+          "tool_name": tool_name,
+          "arguments": None,
+          "sanitized_json": assembled,
+          "is_valid_json": False,
+          "validation_error": "Tool-call arguments must decode to a JSON object.",
+      }
+
+    # Second pass over decoded Python strings catches JSON `\uXXXX`-escaped tags or handles
+    sanitized_args = self.guard.redact_value(parsed)
+    sanitized_args = self.guard.resolve_handles_in_value(sanitized_args)
+
+    validation_err: str | None = None
+    if schema_slimmer is not None and tool_name:
+      sanitized_args = schema_slimmer.coerce_arguments(
+          tool_name, sanitized_args, stats=stats
+      )
+      validation_err = schema_slimmer.validate_union_arguments(
+          tool_name, sanitized_args
+      )
+
+    canonical_json = json.dumps(
+        sanitized_args, ensure_ascii=False, separators=(",", ":")
+    )
+    return {
+        "call_id": call_id,
+        "tool_name": tool_name,
+        "arguments": sanitized_args,
+        "sanitized_json": canonical_json,
+        "is_valid_json": True,
+        "validation_error": validation_err,
+    }

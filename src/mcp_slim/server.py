@@ -8,10 +8,12 @@ import sys
 from typing import Any
 
 from . import __version__
-from .guard import SecretGuard
+from .guard import SecretGuard, StreamSanitizer
 from .slimmer import (
+    OutputSlimmer,
     SchemaSlimmer,
     SlimStats,
+    TokenWindowGovernor,
     audit_resources_manifest,
     audit_tools_manifest,
     diff_tools_manifests,
@@ -137,6 +139,61 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["text"],
+        },
+    },
+    {
+        "name": "compact_mcp_output",
+        "description": (
+            "Compact an MCP tools/call result object using OutputSlimmer, SecretGuard, "
+            "optional columnar tables, and sliding exponential token-window budget throttling."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "result": {
+                    "type": "object",
+                    "description": "MCP tools/call result object containing content or structuredContent.",
+                },
+                "tabular_arrays": {
+                    "type": "boolean",
+                    "description": "Convert homogeneous arrays of flat JSON objects into columnar tables.",
+                },
+                "token_budget": {
+                    "type": "integer",
+                    "description": "Optional sliding window token budget (>0 enables adaptive throttling).",
+                },
+                "prior_window_tokens": {
+                    "type": "number",
+                    "description": "Current accumulated sliding-window tokens prior to this turn.",
+                },
+                "window_decay": {
+                    "type": "number",
+                    "description": "Exponential per-turn decay factor [0.0..1.0] (default 0.85).",
+                },
+            },
+            "required": ["result"],
+        },
+    },
+    {
+        "name": "sanitize_stream_chunks",
+        "description": (
+            "Sanitize an ordered sequence of streaming text or tool-call JSON delta chunks "
+            "using stateful holdback so secrets and prompt injections split across chunks are scrubbed."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "chunks": {
+                    "type": "array",
+                    "description": "Ordered array of text or JSON delta chunks from a streaming call.",
+                    "items": {"type": "string"},
+                },
+                "vault_handles": {
+                    "type": "boolean",
+                    "description": "Tokenize intercepted secrets into session-scoped [SECRET_REF:...] handles.",
+                },
+            },
+            "required": ["chunks"],
         },
     },
     {
@@ -319,6 +376,73 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
           "id": msg_id,
           "result": _text_result({
               "sanitized": sanitized,
+              "total_redactions": guard.report.total_redactions,
+              "by_category": guard.report.by_category,
+          }),
+      }
+
+    if name == "compact_mcp_output":
+      raw_result = args.get("result")
+      if not isinstance(raw_result, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'result' must be a JSON object.", is_error=True),
+        }
+      budget = int(args.get("token_budget", 0) or 0)
+      prior_win = float(args.get("prior_window_tokens", 0.0) or 0.0)
+      decay = float(args.get("window_decay", 0.85) if args.get("window_decay") is not None else 0.85)
+      gov = TokenWindowGovernor(
+          budget_tokens=budget,
+          decay=decay,
+          initial_window_tokens=prior_win,
+      )
+      out_slimmer = OutputSlimmer(
+          tabular_arrays=bool(args.get("tabular_arrays", False)),
+          window_governor=gov,
+      )
+      guard = SecretGuard(enabled=True)
+      stats = SlimStats()
+      compacted_res = out_slimmer.slim_call_result(
+          raw_result, stats=stats, guard=guard, governor=gov
+      )
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result({
+              "tokens_before": stats.output_tokens_before,
+              "tokens_after": stats.output_tokens_after,
+              "reduction_pct": stats.reduction_pct,
+              "tables_compacted": stats.tables_compacted,
+              "secrets_redacted": guard.report.total_redactions,
+              "window": gov.snapshot(),
+              "result": compacted_res,
+          }),
+      }
+
+    if name == "sanitize_stream_chunks":
+      chunks = args.get("chunks")
+      if not isinstance(chunks, list) or not all(isinstance(c, str) for c in chunks):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'chunks' must be an array of strings.", is_error=True),
+        }
+      guard = SecretGuard(
+          enabled=True, vault_handles=bool(args.get("vault_handles", False))
+      )
+      sanitizer = StreamSanitizer(guard)
+      emitted_chunks: list[str] = [sanitizer.push(c) for c in chunks]
+      tail = sanitizer.flush()
+      if tail:
+        emitted_chunks.append(tail)
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result({
+              "sanitized_chunks": [c for c in emitted_chunks if c],
+              "sanitized_text": "".join(emitted_chunks),
+              "chunks_processed": sanitizer.chunks_processed,
               "total_redactions": guard.report.total_redactions,
               "by_category": guard.report.by_category,
           }),

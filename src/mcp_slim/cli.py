@@ -560,6 +560,8 @@ def wrap_config(
     tabular_arrays: bool = False,
     allow_resource_prefixes: str | None = None,
     deny_resource_prefixes: str | None = None,
+    token_budget: int = 0,
+    window_decay: float = 0.85,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -595,6 +597,10 @@ def wrap_config(
       prefix.extend(["--allow-resource-prefixes", allow_resource_prefixes])
     if deny_resource_prefixes:
       prefix.extend(["--deny-resource-prefixes", deny_resource_prefixes])
+    if token_budget > 0:
+      prefix.extend(["--token-budget", str(token_budget)])
+      if window_decay != 0.85:
+        prefix.extend(["--window-decay", str(window_decay)])
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -730,6 +736,18 @@ def main(argv: list[str] | None = None) -> int:
       help="Compact homogeneous arrays of flat JSON objects in tools/call outputs into columnar tables",
   )
   run_p.add_argument(
+      "--token-budget",
+      type=int,
+      default=0,
+      help="Sliding exponential token-window budget for MCP outputs; dynamically tightens output limits as recent load rises (0 disables)",
+  )
+  run_p.add_argument(
+      "--window-decay",
+      type=float,
+      default=0.85,
+      help="Exponential per-turn decay factor [0.0..1.0] for --token-budget sliding window (default: 0.85; 1.0 = cumulative cap)",
+  )
+  run_p.add_argument(
       "--otel-jsonl",
       type=Path,
       default=None,
@@ -846,6 +864,18 @@ def main(argv: list[str] | None = None) -> int:
       type=str,
       default=None,
       help="Wrap servers with --deny-resource-prefixes URI denylist enforcement",
+  )
+  wrap_p.add_argument(
+      "--token-budget",
+      type=int,
+      default=0,
+      help="Wrap servers with --token-budget sliding exponential context-window budget compaction",
+  )
+  wrap_p.add_argument(
+      "--window-decay",
+      type=float,
+      default=0.85,
+      help="Decay factor [0.0..1.0] paired with --token-budget when wrapping mcpServers (default: 0.85)",
   )
   wrap_p.add_argument(
       "--runner",
@@ -1003,6 +1033,8 @@ def main(argv: list[str] | None = None) -> int:
         tabular_arrays=parsed.tabular_arrays,
         allow_resource_prefixes=parsed.allow_resource_prefixes,
         deny_resource_prefixes=parsed.deny_resource_prefixes,
+        token_budget=parsed.token_budget,
+        window_decay=parsed.window_decay,
     )
 
   if parsed.subcommand == "bridge":
@@ -1067,6 +1099,8 @@ def main(argv: list[str] | None = None) -> int:
         allow_new_tools=parsed.allow_new_tools,
         allow_resource_prefixes=allow_res_set,
         deny_resource_prefixes=deny_res_set,
+        token_budget=parsed.token_budget,
+        window_decay=parsed.window_decay,
         otel_jsonl_path=parsed.otel_jsonl,
     )
     return asyncio.run(proxy.run_stdio(cmd))
