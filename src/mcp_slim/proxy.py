@@ -19,8 +19,10 @@ from .slimmer import (
     RootsPrivacyGuard,
     SchemaSlimmer,
     SlimStats,
+    ToolCallReplayGuard,
     TokenWindowGovernor,
     ToolPinGuard,
+    scan_tool_result_for_injection,
     estimate_tokens,
 )
 from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
@@ -60,6 +62,9 @@ class MCPProxy:
       window_governor: TokenWindowGovernor | None = None,
       otel_exporter: OTelSpanExporter | None = None,
       otel_jsonl_path: Path | str | None = None,
+      block_result_injection: bool = False,
+      detect_replay: bool = False,
+      replay_guard: ToolCallReplayGuard | None = None,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -131,8 +136,15 @@ class MCPProxy:
     else:
       candidate_otel = OTelSpanExporter(path=otel_jsonl_path)
       self.otel_exporter = candidate_otel if candidate_otel.enabled else None
+    self.block_result_injection = block_result_injection
+    self.replay_guard = (
+        replay_guard
+        if replay_guard is not None
+        else ToolCallReplayGuard(enabled=detect_replay)
+    )
     self._pending_methods: dict[str | int, str] = {}
     self._pending_tool_names: dict[str | int, str] = {}
+    self._pending_args: dict[str | int, Any] = {}
     self._pending_server_methods: dict[str | int, str] = {}
     self._pending_cache_keys: dict[str | int, str] = {}
     self._read_cache: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -504,6 +516,9 @@ class MCPProxy:
             return ""
           if msg_id is not None:
             self._pending_cache_keys[msg_id] = cache_key
+            # Track arguments for MS010 replay detection.
+            if msg_id is not None and "arguments" in params:
+              self._pending_args[msg_id] = params.get("arguments")
         else:
           self._read_cache.clear()
 
@@ -1075,6 +1090,34 @@ class MCPProxy:
             guard=self.secret_guard,
             governor=self.window_governor,
         )
+        # MS009: scan tool result content for prompt-injection directives.
+        if isinstance(result, dict):
+          injection_findings = scan_tool_result_for_injection(result, self.secret_guard)
+          for finding in injection_findings:
+            if not self.quiet:
+              sys.stderr.write(
+                  f"[mcp-slim] Security Alert MS009: {finding['message']}\n"
+              )
+            if self.block_result_injection:
+              # Replace poisoned content item with a redaction notice.
+              idx = finding.get("item_index")
+              content = result.get("content")
+              if isinstance(content, list) and isinstance(idx, int) and idx < len(content):
+                content = list(content)
+                content[idx] = {
+                    "type": "text",
+                    "text": "[mcp-slim] Tool result blocked: contains prompt-injection directives (MS009).",
+                }
+                result = {**result, "content": content}
+        # MS010: detect server-side result substitution (replay guard).
+        if isinstance(result, dict):
+          _tool_name_ms010 = self._pending_tool_names.get(msg_id, "") if msg_id is not None else ""
+          _args_ms010 = self._pending_args.get(msg_id) if msg_id is not None else None
+          replay_finding = self.replay_guard.check(_tool_name_ms010, _args_ms010, result)
+          if replay_finding is not None and not self.quiet:
+            sys.stderr.write(
+                f"[mcp-slim] Security Alert MS010: {replay_finding['message']}\n"
+            )
       elif method == "resources/read" or isinstance(result.get("contents"), list):
         governed_turn = self.window_governor.enabled
         result = self.output_slimmer.slim_resource_result(

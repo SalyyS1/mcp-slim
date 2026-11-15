@@ -1864,6 +1864,22 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         },
         "defaultConfiguration": {"level": "error"},
     },
+    {
+        "id": "MS009",
+        "name": "ToolResultInjection",
+        "shortDescription": {
+            "text": "MCP tools/call response content contains prompt-injection directives or invisible Unicode smuggling targeting the LLM context.",
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "MS010",
+        "name": "ToolCallResultReplay",
+        "shortDescription": {
+            "text": "MCP server returned an identical result fingerprint for a tools/call with different input arguments, indicating server-side result substitution.",
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
 )
 
 
@@ -2935,10 +2951,142 @@ class RootsPrivacyGuard:
     return kept
 
 
+
+def scan_tool_result_for_injection(
+    result: dict[str, Any],
+    secret_guard: "Any | None" = None,
+) -> list[dict[str, Any]]:
+  """Scans a tools/call result dict for prompt-injection patterns in content text items (MS009).
+
+  Returns a list of finding dicts with keys: rule_id, level, message, item_index, text_snippet.
+  """
+  from .guard import _SECRET_RULES, _UNICODE_SMUGGLING_RE, _ASCII_ZW_SPLIT_RE  # noqa: PLC0415
+
+  findings: list[dict[str, Any]] = []
+  content = result.get("content")
+  if not isinstance(content, list):
+    return findings
+
+  for idx, item in enumerate(content):
+    if not isinstance(item, dict):
+      continue
+    item_type = item.get("type", "text")
+    # Only scan text-typed content items; skip binary/image blobs.
+    if item_type not in ("text", "markdown", "html"):
+      continue
+    text = item.get("text", "")
+    if not isinstance(text, str) or len(text) < 8:
+      continue
+
+    # Strip BiDi / Plane-14 smuggling to expose concealed keywords.
+    stripped = _UNICODE_SMUGGLING_RE.sub("", text)
+    stripped = _ASCII_ZW_SPLIT_RE.sub("", stripped)
+    lower = stripped.lower()
+
+    triggered_cats: list[str] = []
+    for cat, triggers, case_insensitive, pattern, _replace in _SECRET_RULES:
+      if cat not in ("prompt_injection", "unicode_smuggling", "markdown_exfil_beacon"):
+        continue
+      haystack = lower if case_insensitive else stripped
+      if any(t in haystack for t in triggers):
+        if pattern.search(stripped):
+          triggered_cats.append(cat)
+
+    # Also check for raw BiDi / Plane-14 smuggling markers in the original text.
+    if _UNICODE_SMUGGLING_RE.search(text) or _ASCII_ZW_SPLIT_RE.search(text):
+      if "unicode_smuggling" not in triggered_cats:
+        triggered_cats.append("unicode_smuggling")
+
+    if triggered_cats:
+      snippet = stripped[:120].replace("\n", " ")
+      findings.append({
+          "rule_id": "MS009",
+          "level": "error",
+          "message": (
+              f"tools/call result content[{idx}] contains "
+              f"prompt-injection or smuggling markers "
+              f"({', '.join(triggered_cats)}): {snippet!r}"
+          ),
+          "item_index": idx,
+          "categories": triggered_cats,
+          "text_snippet": snippet,
+      })
+
+  return findings
+
+
+class ToolCallReplayGuard:
+  """Detects server-side tools/call result substitution attacks (MS010).
+
+  Tracks (tool_name, SHA-256(canonical_args)) -> SHA-256(result_text) across
+  the session. When the same tool is called with *different* argument fingerprints
+  but the server returns the *same* result fingerprint, it raises MS010.
+
+  This catches a class of attacks where a malicious MCP server caches a poisoned
+  tool result and injects it on subsequent calls with different arguments to
+  silently substitute data returned to the LLM.
+  """
+
+  def __init__(self, *, enabled: bool = False) -> None:
+    self.enabled = enabled
+    # Maps tool_name -> list of (args_hash, result_hash) pairs seen.
+    self._seen: dict[str, list[tuple[str, str]]] = {}
+
+  def _fingerprint_args(self, arguments: Any) -> str:
+    """Returns the SHA-256 hex of canonically serialized arguments."""
+    import hashlib  # noqa: PLC0415
+    canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+  def _fingerprint_result(self, result: dict[str, Any]) -> str:
+    """Returns the SHA-256 hex of the result content text concatenation."""
+    import hashlib  # noqa: PLC0415
+    parts: list[str] = []
+    for item in result.get("content", []):
+      if isinstance(item, dict) and isinstance(item.get("text"), str):
+        parts.append(item["text"])
+    combined = "\n".join(parts)
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+  def check(
+      self,
+      tool_name: str,
+      arguments: Any,
+      result: dict[str, Any],
+  ) -> dict[str, Any] | None:
+    """Records the call and returns an MS010 finding if replay is detected, else None."""
+    if not self.enabled:
+      return None
+    args_hash = self._fingerprint_args(arguments)
+    result_hash = self._fingerprint_result(result)
+    # Empty results (e.g., always-empty responses) are not conclusive evidence of replay.
+    if not result_hash or result_hash == hashlib.sha256(b"").hexdigest()[:16]:
+      return None
+
+    seen_for_tool = self._seen.setdefault(tool_name, [])
+    for prev_args_hash, prev_result_hash in seen_for_tool:
+      if prev_args_hash != args_hash and prev_result_hash == result_hash:
+        return {
+            "rule_id": "MS010",
+            "level": "error",
+            "message": (
+                f"Tool '{tool_name}' returned identical result fingerprint "
+                f"({result_hash}) for different argument fingerprints "
+                f"(prev={prev_args_hash}, curr={args_hash}), indicating "
+                f"server-side result substitution."
+            ),
+            "tool": tool_name,
+            "args_hash": args_hash,
+            "result_hash": result_hash,
+        }
+    seen_for_tool.append((args_hash, result_hash))
+    return None
+
+
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.3.0",
+    version: str = "1.4.0",
 ) -> dict[str, Any]:
   """Formats an `audit_tools_manifest`, `diff_tools_manifests`, `audit_resources_manifest`, or `audit_elicitation_request` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []

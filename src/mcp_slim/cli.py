@@ -728,6 +728,16 @@ def main(argv: list[str] | None = None) -> int:
       help="Allow elicitation/create schemas that request passwords, API keys, or OTP codes (blocked by default when SecretGuard is active)",
   )
   run_p.add_argument(
+      "--block-result-injection",
+      action="store_true",
+      help="Scan tools/call response content for prompt-injection directives (MS009) and replace poisoned items with a redaction notice",
+  )
+  run_p.add_argument(
+      "--detect-replay",
+      action="store_true",
+      help="Detect server-side result substitution attacks (MS010): alert when the same tool returns identical result fingerprints for different arguments",
+  )
+  run_p.add_argument(
       "--block-roots",
       action="store_true",
       help="Intercept server-initiated roots/list requests locally and return an empty roots list to conceal host workspace paths",
@@ -1162,6 +1172,8 @@ def main(argv: list[str] | None = None) -> int:
         block_sampling=parsed.block_sampling,
         block_elicitation=parsed.block_elicitation,
         allow_credential_elicitation=parsed.allow_credential_elicitation,
+        block_result_injection=parsed.block_result_injection,
+        detect_replay=parsed.detect_replay,
         block_roots=parsed.block_roots,
         allow_root_prefixes=allow_root_set,
         deny_root_prefixes=deny_root_set,
