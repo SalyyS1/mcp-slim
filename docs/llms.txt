@@ -1,5 +1,5 @@
-# mcp-slim (v1.2.0)
-> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% tokens), Sliding Exponential Token-Window Budgets (`--token-budget`), Streaming Tool-Call & Chunk Sanitization, Cross-LLM `$defs/$ref` Inlining, Mid-Session Rug-Pull Schema Pinning (`--pin-schemas`), Resource URI Allowlists (`--allow-resource-prefixes`), Real-Time Secret Redaction (~0.93 ms p50), and OpenTelemetry JSONL Spans.
+# mcp-slim (v1.3.0)
+> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% tokens), Server-Initiated Elicitation Phishing Firewall (`MS007` / `--block-elicitation`), Workspace `roots/list` Privacy Boundaries (`--block-roots` / `--allow-root-prefixes`), Cross-Tool Shadowing Detection (`MS008`), Sliding Exponential Token-Window Budgets (`--token-budget`), Streaming Sanitization, `$defs/$ref` Inlining, Rug-Pull Schema Pinning (`--pin-schemas`), and Real-Time Secret Redaction (~0.93 ms p50).
 
 - Repository: https://github.com/SalyyS1/mcp-slim
 - Live Interactive Playground: https://salyys1.github.io/mcp-slim/

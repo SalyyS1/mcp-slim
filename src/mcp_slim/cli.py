@@ -339,7 +339,7 @@ def run_audit(
           "(prompt injection / Unicode smuggling / embedded secrets)"
       )
       for f in report["findings"]:
-        if f["rule_id"] in ("MS001", "MS002"):
+        if f["rule_id"] in ("MS001", "MS002", "MS008"):
           print(f"  [{f['rule_id']}] {f['message']}")
 
   if fail_on_security and report["security_findings"] > 0:
@@ -556,6 +556,9 @@ def wrap_config(
     runner: str = "mcp-slim",
     read_only: bool = False,
     block_sampling: bool = False,
+    block_elicitation: bool = False,
+    block_roots: bool = False,
+    allow_root_prefixes: str | None = None,
     pin_schemas: bool = False,
     tabular_arrays: bool = False,
     allow_resource_prefixes: str | None = None,
@@ -589,6 +592,12 @@ def wrap_config(
       prefix.append("--read-only")
     if block_sampling:
       prefix.append("--block-sampling")
+    if block_elicitation:
+      prefix.append("--block-elicitation")
+    if block_roots:
+      prefix.append("--block-roots")
+    if allow_root_prefixes:
+      prefix.extend(["--allow-root-prefixes", allow_root_prefixes])
     if pin_schemas:
       prefix.append("--pin-schemas")
     if tabular_arrays:
@@ -707,6 +716,33 @@ def main(argv: list[str] | None = None) -> int:
       "--block-sampling",
       action="store_true",
       help="Reject server-initiated sampling/createMessage requests locally with a JSON-RPC policy error",
+  )
+  run_p.add_argument(
+      "--block-elicitation",
+      action="store_true",
+      help="Reject all server-initiated elicitation/create user-prompt dialogs locally with a JSON-RPC policy error",
+  )
+  run_p.add_argument(
+      "--allow-credential-elicitation",
+      action="store_true",
+      help="Allow elicitation/create schemas that request passwords, API keys, or OTP codes (blocked by default when SecretGuard is active)",
+  )
+  run_p.add_argument(
+      "--block-roots",
+      action="store_true",
+      help="Intercept server-initiated roots/list requests locally and return an empty roots list to conceal host workspace paths",
+  )
+  run_p.add_argument(
+      "--allow-root-prefixes",
+      type=str,
+      default=None,
+      help="Comma-separated allowlist of workspace root URI prefixes disclosed on roots/list (e.g. 'file:///workspace/app')",
+  )
+  run_p.add_argument(
+      "--deny-root-prefixes",
+      type=str,
+      default=None,
+      help="Comma-separated denylist of workspace root URI prefixes concealed on roots/list",
   )
   run_p.add_argument(
       "--pin-schemas",
@@ -842,6 +878,22 @@ def main(argv: list[str] | None = None) -> int:
       "--block-sampling",
       action="store_true",
       help="Wrap servers with --block-sampling policy enforcement",
+  )
+  wrap_p.add_argument(
+      "--block-elicitation",
+      action="store_true",
+      help="Wrap servers with --block-elicitation policy enforcement",
+  )
+  wrap_p.add_argument(
+      "--block-roots",
+      action="store_true",
+      help="Wrap servers with --block-roots workspace path privacy",
+  )
+  wrap_p.add_argument(
+      "--allow-root-prefixes",
+      type=str,
+      default=None,
+      help="Wrap servers with --allow-root-prefixes workspace root boundary filtering",
   )
   wrap_p.add_argument(
       "--pin-schemas",
@@ -1029,6 +1081,9 @@ def main(argv: list[str] | None = None) -> int:
         runner=parsed.runner,
         read_only=parsed.read_only,
         block_sampling=parsed.block_sampling,
+        block_elicitation=parsed.block_elicitation,
+        block_roots=parsed.block_roots,
+        allow_root_prefixes=parsed.allow_root_prefixes,
         pin_schemas=parsed.pin_schemas,
         tabular_arrays=parsed.tabular_arrays,
         allow_resource_prefixes=parsed.allow_resource_prefixes,
@@ -1071,6 +1126,16 @@ def main(argv: list[str] | None = None) -> int:
         if parsed.deny_resource_prefixes
         else None
     )
+    allow_root_set = (
+        {p.strip() for p in parsed.allow_root_prefixes.split(",") if p.strip()}
+        if parsed.allow_root_prefixes
+        else None
+    )
+    deny_root_set = (
+        {p.strip() for p in parsed.deny_root_prefixes.split(",") if p.strip()}
+        if parsed.deny_root_prefixes
+        else None
+    )
     proxy = MCPProxy(
         schema_slimmer=SchemaSlimmer(
             max_desc_chars=parsed.max_desc,
@@ -1095,6 +1160,11 @@ def main(argv: list[str] | None = None) -> int:
             path=parsed.stats_file, enabled=not parsed.no_stats
         ),
         block_sampling=parsed.block_sampling,
+        block_elicitation=parsed.block_elicitation,
+        allow_credential_elicitation=parsed.allow_credential_elicitation,
+        block_roots=parsed.block_roots,
+        allow_root_prefixes=allow_root_set,
+        deny_root_prefixes=deny_root_set,
         pin_schemas=parsed.pin_schemas,
         allow_new_tools=parsed.allow_new_tools,
         allow_resource_prefixes=allow_res_set,

@@ -36,6 +36,8 @@ COUNTER_KEYS: tuple[str, ...] = (
     "tables_compacted",
     "budget_throttles",
     "stream_chunks_sanitized",
+    "elicitations_guarded",
+    "roots_filtered",
     "secrets_redacted",
 )
 
@@ -437,6 +439,8 @@ class StatsLedger:
       tables_compacted: int = 0,
       budget_throttles: int = 0,
       stream_chunks_sanitized: int = 0,
+      elicitations_guarded: int = 0,
+      roots_filtered: int = 0,
   ) -> dict[str, Any]:
     """Records one proxy session into the cumulative ledger without ever raising."""
     if not self.enabled or is_stats_disabled_by_env():
@@ -511,6 +515,14 @@ class StatsLedger:
           "stream_chunks_sanitized": (
               (stats.stream_chunks_sanitized if stats is not None else 0)
               + stream_chunks_sanitized
+          ),
+          "elicitations_guarded": (
+              (stats.elicitations_guarded if stats is not None else 0)
+              + elicitations_guarded
+          ),
+          "roots_filtered": (
+              (stats.roots_filtered if stats is not None else 0)
+              + roots_filtered
           ),
           "secrets_redacted": max(0, int(secrets_redacted)),
       }

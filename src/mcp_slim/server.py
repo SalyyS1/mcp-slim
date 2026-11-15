@@ -14,6 +14,7 @@ from .slimmer import (
     SchemaSlimmer,
     SlimStats,
     TokenWindowGovernor,
+    audit_elicitation_request,
     audit_resources_manifest,
     audit_tools_manifest,
     diff_tools_manifests,
@@ -194,6 +195,23 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["chunks"],
+        },
+    },
+    {
+        "name": "audit_mcp_elicitation",
+        "description": (
+            "Audit a server-initiated MCP elicitation/create payload for credential "
+            "phishing schemas, auth URL traps, and Unicode smuggling (MS007)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "params": {
+                    "type": "object",
+                    "description": "MCP elicitation/create params containing message and requestedSchema.",
+                }
+            },
+            "required": ["params"],
         },
     },
     {
@@ -446,6 +464,20 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
               "total_redactions": guard.report.total_redactions,
               "by_category": guard.report.by_category,
           }),
+      }
+
+    if name == "audit_mcp_elicitation":
+      el_params = args.get("params")
+      if not isinstance(el_params, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'params' must be a JSON object.", is_error=True),
+        }
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(audit_elicitation_request(el_params)),
       }
 
     if name == "get_slim_stats":

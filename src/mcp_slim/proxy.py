@@ -12,9 +12,11 @@ from typing import Any, Callable, Awaitable
 
 from .guard import SecretGuard, StreamSanitizer, ToolCallStreamSanitizer
 from .slimmer import (
+    ElicitationGuard,
     LazyToolBroker,
     OutputSlimmer,
     ResourceUriGuard,
+    RootsPrivacyGuard,
     SchemaSlimmer,
     SlimStats,
     TokenWindowGovernor,
@@ -40,6 +42,13 @@ class MCPProxy:
       no_stats: bool = False,
       stats_ledger: StatsLedger | None = None,
       block_sampling: bool = False,
+      block_elicitation: bool = False,
+      allow_credential_elicitation: bool = False,
+      elicitation_guard: ElicitationGuard | None = None,
+      block_roots: bool = False,
+      allow_root_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      deny_root_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      roots_guard: RootsPrivacyGuard | None = None,
       pin_schemas: bool = False,
       allow_new_tools: bool = False,
       pin_guard: ToolPinGuard | None = None,
@@ -66,6 +75,26 @@ class MCPProxy:
     self.bridge_socket = bridge_socket
     self.no_stats = no_stats
     self.block_sampling = block_sampling
+    self.block_elicitation = block_elicitation
+    self.elicitation_guard = (
+        elicitation_guard
+        if elicitation_guard is not None
+        else ElicitationGuard(
+            block_all=block_elicitation,
+            block_credential_phishing=(
+                self.secret_guard.enabled and not allow_credential_elicitation
+            ),
+        )
+    )
+    self.roots_guard = (
+        roots_guard
+        if roots_guard is not None
+        else RootsPrivacyGuard(
+            block_all=block_roots,
+            allow_prefixes=allow_root_prefixes,
+            deny_prefixes=deny_root_prefixes,
+        )
+    )
     self.pin_schemas = pin_schemas
     self.pin_guard = (
         pin_guard
@@ -183,8 +212,21 @@ class MCPProxy:
       wire_in = len(raw_line.encode("utf-8"))
 
       if "result" in msg:
-        if srv_method is None and isinstance(msg.get("result"), dict) and "role" in msg["result"] and "content" in msg["result"]:
+        res_obj = msg.get("result")
+        if srv_method is None and isinstance(res_obj, dict) and "role" in res_obj and "content" in res_obj:
           self.stats.sampling_guarded += 1
+        if (
+            isinstance(res_obj, dict)
+            and isinstance(res_obj.get("roots"), list)
+            and (srv_method == "roots/list" or srv_method is None)
+        ):
+          res_obj = {
+              **res_obj,
+              "roots": self.roots_guard.filter_roots(
+                  res_obj["roots"], stats=self.stats
+              ),
+          }
+          msg["result"] = res_obj
         msg["result"] = self.secret_guard.redact_value(
             msg["result"], force_redact=True
         )
@@ -766,6 +808,136 @@ class MCPProxy:
                 "redactions_on_req": self.secret_guard.report.total_redactions - red_before,
             }
         return out_srv_line
+
+      if srv_method == "elicitation/create":
+        decision = self.elicitation_guard.evaluate(srv_params)
+        self.stats.elicitations_guarded += 1
+        if not decision["allowed"]:
+          self.stats.blocked_calls += 1
+          reason_text = str(decision["reason"] or "[mcp-slim] Elicitation blocked.")
+          if not self.quiet and decision["mode"] == "decline":
+            sys.stderr.write(f"{reason_text}\n")
+          if msg_id is not None:
+            if decision["mode"] == "policy_error":
+              reply_obj: dict[str, Any] = {
+                  "jsonrpc": msg.get("jsonrpc", "2.0"),
+                  "id": msg_id,
+                  "error": {"code": -32600, "message": reason_text},
+              }
+            else:
+              reply_obj = {
+                  "jsonrpc": msg.get("jsonrpc", "2.0"),
+                  "id": msg_id,
+                  "result": {"action": "decline"},
+              }
+            self._local_server_responses.append(
+                json.dumps(reply_obj, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name="mcp.elicitation/create",
+              kind="SERVER",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=reason_text,
+              attributes={
+                  "mcp.method.name": "elicitation/create",
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.elicitation_phishing_blocked": decision["mode"] == "decline",
+              },
+          )
+          return ""
+
+        red_el_0 = self.secret_guard.report.total_redactions
+        sch_b_0 = self.stats.schema_tokens_before
+        sch_a_0 = self.stats.schema_tokens_after
+        if isinstance(srv_params, dict):
+          new_el = dict(srv_params)
+          if isinstance(new_el.get("message"), str) and new_el["message"]:
+            new_el["message"] = self.secret_guard.redact_text(
+                new_el["message"], force_redact=True
+            )
+          if isinstance(new_el.get("requestedSchema"), dict):
+            raw_sch = new_el["requestedSchema"]
+            sch_tok_b = estimate_tokens(raw_sch)
+            slim_sch = self.schema_slimmer.slim_schema_node(
+                raw_sch, is_root=True
+            )
+            sch_tok_a = estimate_tokens(slim_sch)
+            self.stats.schema_tokens_before += sch_tok_b
+            self.stats.schema_tokens_after += sch_tok_a
+            new_el["requestedSchema"] = slim_sch
+          msg["params"] = self.secret_guard.redact_value(new_el, force_redact=True)
+        serialized_el = json.dumps(msg, ensure_ascii=False, separators=(",", ":"))
+        serialized_el = self.secret_guard.redact_text(serialized_el, force_redact=True)
+        out_el_line = serialized_el + "\n"
+        wire_in = len(raw_line.encode("utf-8"))
+        wire_out = len(out_el_line.encode("utf-8"))
+        self.stats.wire_bytes_before += wire_in
+        self.stats.wire_bytes_after += wire_out
+        if msg_id is not None:
+          self._pending_server_methods[msg_id] = srv_method
+          if self.otel_exporter is not None:
+            self._inflight_spans[("server", msg_id)] = {
+                "start_wall_ns": start_wall_ns,
+                "start_mono_ns": start_mono_ns,
+                "method": srv_method,
+                "wire_in": wire_in,
+                "wire_out": wire_out,
+                "tok_before": self.stats.schema_tokens_before - sch_b_0,
+                "tok_after": self.stats.schema_tokens_after - sch_a_0,
+                "redactions_on_req": self.secret_guard.report.total_redactions - red_el_0,
+            }
+        return out_el_line
+
+      if srv_method == "roots/list":
+        if self.roots_guard.block_all:
+          self.stats.blocked_calls += 1
+          self.stats.roots_filtered += 1
+          if msg_id is not None:
+            roots_reply = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": {"roots": []},
+            }
+            self._local_server_responses.append(
+                json.dumps(roots_reply, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name="mcp.roots/list",
+              kind="SERVER",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=False,
+              attributes={
+                  "mcp.method.name": "roots/list",
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.roots_masked": True,
+              },
+          )
+          return ""
+        if msg_id is not None:
+          self._pending_server_methods[msg_id] = srv_method
+          if self.otel_exporter is not None:
+            self._inflight_spans[("server", msg_id)] = {
+                "start_wall_ns": start_wall_ns,
+                "start_mono_ns": start_mono_ns,
+                "method": srv_method,
+                "wire_in": len(raw_line.encode("utf-8")),
+                "wire_out": len(raw_line.encode("utf-8")),
+                "tok_before": 0,
+                "tok_after": 0,
+                "redactions_on_req": 0,
+            }
+        return raw_line
 
       if msg_id is not None:
         self._pending_server_methods[msg_id] = srv_method

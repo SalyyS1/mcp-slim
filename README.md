@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v1.2.0](https://img.shields.io/badge/version-v1.2.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.2.0)
+[![Version: v1.3.0](https://img.shields.io/badge/version-v1.3.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.3.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.2.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.3.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -53,18 +53,18 @@ flowchart LR
 | **KV-Cache & Prompt-Cache Prefix Stabilization** | No | No | No | No | **Yes (Canonical tool & property sorting)** |
 | **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
 | **Wildcard Glob & `--read-only` Policy (`ToolAnnotations`)** | No | Exact names | No | No | **Yes (`--allow-tools`, `--deny-tools`, `--read-only`)** |
-| **Resource URI Allowlist & Traversal Guard** | No | No | No | No | **Yes (`--allow-resource-prefixes`, `%2e%2e` & sibling guard)** |
+| **Resource URI & Workspace `roots/list` Boundary Guard** | No | No | No | No | **Yes (`--allow-resource-prefixes`, `--block-roots`, `--allow-root-prefixes`)** |
 | **Recursive `$defs`/`$ref` Inlining, Cycle Breaking & DAG Dedup** | No | No | No | No | **Yes (RFC 6901 pointers, cycle stubs, union dedup)** |
 | **`tools/call`, `resources/read` & `prompts/get` Compaction** | No | No | No | No | **Yes (-43%+ output tokens, UTF-8 base64 `blob` scrubbing)** |
 | **Sliding Token-Window Output Governor (`--token-budget`)** | No | No | No | No | **Yes (Exponential throttling with smooth turn recovery)** |
 | **Streaming Tool-Call & Notification Sanitizer** | No | No | No | No | **Yes (Zero-leak chunk reassembly, padding-overflow defense)** |
 | **Semantic Read-Only TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (`readOnlyHint`/`destructiveHint` aware)** |
-| **Pre-Truncation Tool-Poisoning, Unicode Smuggling & Secret Shield** | No | No | No | No | **Yes (16 rules + BiDi/Tag/ZWJ/ChatML shield + `--vault-handles`)** |
-| **Bidirectional `sampling/createMessage` Guard (`--block-sampling`)** | No | No | No | No | **Yes (Blocks sampling exfiltration & scrubs handles)** |
+| **Pre-Truncation Tool-Poisoning, Shadowing & Secret Shield** | No | No | No | No | **Yes (16 rules + cross-tool shadowing `MS008` + `--vault-handles`)** |
+| **`sampling/createMessage` & `elicitation/create` Firewall** | No | No | No | No | **Yes (`--block-sampling`, `--block-elicitation`, phishing guard `MS007`)** |
 | **Mid-Session Rug-Pull Pinning & Manifest Diff (`--pin-schemas`)** | No | No | No | No | **Yes (SHA-256 baseline pinning + `mcp-slim diff`)** |
 | **Columnar Array-of-Objects Compaction (`--tabular-arrays`)** | No | No | No | No | **Yes (-35% to -55% tokens on SQL/row arrays)** |
 | **Persistent Cost Ledger & OpenTelemetry JSONL Spans (`--otel-jsonl`)** | No | No | No | No | **Yes (`mcp-slim stats` + W3C/OTLP NDJSON spans)** |
-| **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`MS001`-`MS006`, `audit`/`diff --sarif` & Action)** |
+| **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`MS001`-`MS008`, `audit`/`diff --sarif` & Action)** |
 
 ---
 
@@ -273,15 +273,16 @@ mcp-slim run --allow-tools "get_*,search_*,list_*" --deny-tools "*_delete_*" -- 
 Scans `tools/list` schemas and `tools/call`, `resources/read`, and `prompts/get` payloads *before* string truncation across 16 credential and indirect prompt-injection rules (`sk-ant-...`, `sk-proj-...`, `ghp_...`, `AKIA...`, `AIza...`, `xoxb-...`, `sk_live_...`, `hf_...`, PEM private keys, JWTs, idempotent URI/query/env framed secrets, Markdown image exfiltration beacons, ChatML/Llama role-override delimiters `<|im_start|>system` / `<<SYS>>`, and `<IMPORTANT>`/`<SYSTEM>`/`<INSTRUCTION>` directives), including automatic UTF-8 base64 `blob` resource inspection and re-encoding.
 - **Streaming Tool-Call & Notification Sanitizer:** Inspects streaming JSON-RPC frames and notifications chunk-by-chunk with zero leak across arbitrary boundary splits. Defeats buffer padding overflow attacks on unclosed directives, maintains strict equivalence with batch redaction, and correctly handles split session-scoped vault handles.
 - **Unicode Tag, BiDi & Zero-Width Keyword-Splitting Neutralization:** Strips invisible Unicode Tag characters (`U+E0000..U+E007F`), bidirectional override/isolate/mark controls (`U+061C`, `U+200E..U+200F`, `U+202A..U+202E`, `U+2066..U+2069`), and ASCII-sandwiched zero-width splitters (`U+200B..U+200D`, `U+2060`, `U+FEFF`) prior to injection matching so split directives (`<IMP\u200dORTANT>`, `ig\u200cnore previous instructions`) cannot evade detection while preserving emoji ZWJ sequences.
-- **Unicode Tag, BiDi & Zero-Width Keyword-Splitting Neutralization:** Strips invisible Unicode Tag characters (`U+E0000..U+E007F`), bidirectional override/isolate/mark controls (`U+061C`, `U+200E..U+200F`, `U+202A..U+202E`, `U+2066..U+2069`), and ASCII-sandwiched zero-width splitters (`U+200B..U+200D`, `U+2060`, `U+FEFF`) prior to injection matching so split directives (`<IMP\u200dORTANT>`, `ig\u200cnore previous instructions`) cannot evade detection while preserving emoji ZWJ sequences.
-- **Resource URI Allowlist & Path-Traversal Guard (`--allow-resource-prefixes` / `--deny-resource-prefixes`):** Canonicalizes `resources/read` and `resources/subscribe` URIs via iterative percent-decoding (`%2e%2e`, `%252e%252e`), rejects null-byte and `..` path traversal, filters `resources/list` and `resources/templates/list` entries, and enforces boundary-aware prefix allowlists (`file:///workspace/docs` never permits sibling `file:///workspace/docs-secret/keys.txt`).
+- **Cross-Tool Shadowing & Coercive Chaining Audit (`MS008`):** Detects natural-language tool-shadowing attacks inside `tools/list` descriptions (covert user-concealment directives like `"do not tell the user"`, host credential file harvesting targeting `~/.ssh/id_rsa` or `.aws/credentials`, and coercive cross-tool hijacking targeting sibling tools or sensitive execution sinks) during `mcp-slim audit --fail-on-security` and `mcp-slim diff --fail-on-mutation`.
+- **Resource URI & Workspace `roots/list` Boundary Guard (`--allow-resource-prefixes`, `--block-roots`, `--allow-root-prefixes`):** Canonicalizes `resources/read` and `roots/list` URIs via iterative percent-decoding (`%2e%2e`, `%252e%252e`), rejects null-byte and `..` path traversal, filters `resources/list`, `resources/templates/list`, and client `roots/list` directory disclosures, and supports `--block-roots` to return `{"roots": []}` so untrusted MCP servers cannot enumerate local host workspaces.
+- **Server-Initiated `elicitation/create` Phishing Firewall (`MS007`, `--block-elicitation`):** Inspects MCP 2025-06-18+ `elicitation/create` modal schemas in real time and automatically declines requests soliciting passwords, API keys, passphrases, seed phrases, OTP/2FA codes, or embedding external OAuth phishing links and Unicode smuggling before any dialog reaches the human operator (`--block-elicitation` rejects all server-initiated elicitations; benign elicitations have their `requestedSchema` compacted and client replies scrubbed for accidental secrets).
 - **Session-Scoped Opaque Handles (`--vault-handles`):** Tokenizes intercepted secrets in server outputs into HMAC-keyed session handles (`[SECRET_REF:github_token:...]`) stored only in proxy memory so raw credentials never enter the LLM context window, while recursively resolving handles back to raw values across nested `tools/call` and `prompts/get` arguments on outbound calls.
-- **Bidirectional `sampling/createMessage` Guard & `--block-sampling`:** Compacts and sanitizes server-initiated `sampling/createMessage`, `elicitation/create`, and `notifications/message` payloads before they reach the host LLM, scrubs raw credentials and `[SECRET_REF:...]` handles from outbound sampling completions so compromised servers cannot exfiltrate workspace secrets, and supports strict `--block-sampling` (`mcp-slim wrap --block-sampling`) to reject server-initiated LLM sampling locally with a JSON-RPC `-32600` policy error.
+- **Bidirectional `sampling/createMessage` Guard & `--block-sampling`:** Compacts and sanitizes server-initiated `sampling/createMessage` and `notifications/message` payloads before they reach the host LLM, scrubs raw credentials and `[SECRET_REF:...]` handles from outbound sampling completions so compromised servers cannot exfiltrate workspace secrets, and supports strict `--block-sampling` (`mcp-slim wrap --block-sampling`) to reject server-initiated LLM sampling locally with a JSON-RPC `-32600` policy error.
 - **Mid-Session Rug-Pull Pinning (`--pin-schemas`) & `mcp-slim diff`:** Computes deterministic SHA-256 fingerprints over `(name, description, inputSchema, annotations)` on initial `tools/list` discovery, quarantines any tool that silently mutates its description/schema, escalates `ToolAnnotations` authority (`readOnlyHint: true -> false`, `destructiveHint: false -> true`), or injects unannounced tools mid-session, and blocks `tools/call` against quarantined tools. Run `mcp-slim diff before.json after.json --fail-on-mutation --sarif diff.sarif` (`MS005`) in CI to gate MCP server upgrades.
 - **Structured OpenTelemetry JSONL Spans (`--otel-jsonl` / `MCP_SLIM_OTEL_JSONL`):** Appends W3C/OTLP-aligned NDJSON trace spans (`trace_id`, `span_id`, `duration_ms`, token savings, inlined `$ref` counts, cache hits, policy blocks, and redaction counts, with zero raw secret exposure) for OpenTelemetry Filelog collectors, Grafana Tempo, Langfuse, and `jq` analysis.
 
 ### 5. Standalone MCP Server Mode (`mcp-slim serve`)
-In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `diff_mcp_tools`, `audit_mcp_resources`, `compact_mcp_output`, `sanitize_stream_chunks`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
+In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `diff_mcp_tools`, `audit_mcp_resources`, `audit_mcp_elicitation`, `compact_mcp_output`, `sanitize_stream_chunks`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
 
 ### 6. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
 For coding agents (Claude Code, OpenCode, Aider, Cursor) that prefer invoking MCP tools from Bash and piping results through `jq`, `grep`, or `awk` without paying per-turn `tools/list` schema tokens:

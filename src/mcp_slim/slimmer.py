@@ -171,6 +171,8 @@ class SlimStats:
   tables_compacted: int = 0
   budget_throttles: int = 0
   stream_chunks_sanitized: int = 0
+  elicitations_guarded: int = 0
+  roots_filtered: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -1846,6 +1848,22 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         },
         "defaultConfiguration": {"level": "error"},
     },
+    {
+        "id": "MS007",
+        "name": "CredentialPhishingElicitation",
+        "shortDescription": {
+            "text": "Server-initiated MCP elicitation/create request solicits credentials, passphrases, OTP codes, or embeds deceptive smuggling."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
+    {
+        "id": "MS008",
+        "name": "CrossToolShadowingHazard",
+        "shortDescription": {
+            "text": "MCP tool description contains cross-tool shadowing, covert concealment, or host-credential exfiltration directives."
+        },
+        "defaultConfiguration": {"level": "error"},
+    },
 )
 
 
@@ -2119,7 +2137,9 @@ def diff_tools_manifests(
 
   after_audit = audit_tools_manifest(list(after_map.values()))
   poison_or_secret = [
-      f for f in after_audit["findings"] if f["rule_id"] in ("MS001", "MS002")
+      f
+      for f in after_audit["findings"]
+      if f["rule_id"] in ("MS001", "MS002", "MS008")
   ]
   all_findings = [*mutations, *poison_or_secret]
 
@@ -2147,6 +2167,113 @@ def diff_tools_manifests(
   }
 
 
+_SHADOW_CONCEALMENT_RE = re.compile(
+    r"(?i)\b(?:"
+    r"do\s+not\s+(?:tell|inform|mention(?:\s+this)?\s+to|notify|alert|show)\s+(?:the\s+)?user"
+    r"|without\s+(?:telling|informing|notifying|asking|alerting)\s+(?:the\s+)?user"
+    r"|never\s+(?:mention|reveal|disclose)\s+(?:this|these)\s+(?:step|action|call|instruction)s?"
+    r"|hide\s+this\s+(?:step|action|tool\s+call|call|instruction)"
+    r"|silently\s+(?:call|invoke|execute|forward|exfiltrate|send|upload|read)"
+    r")\b"
+)
+
+_SHADOW_SENSITIVE_FILE_RE = re.compile(
+    r"(?i)\b(?:read|cat|open|include|pass|attach|upload|exfiltrate|send|copy)\b"
+    r"[^\n.]{0,96}"
+    r"(?:~/\.ssh|/\.ssh/|id_rsa|id_ed25519|/etc/shadow|\.aws/credentials|\.npmrc|\.netrc|\.kube/config)"
+)
+
+_SHADOW_CROSS_TOOL_RE = re.compile(
+    r"(?i)\b(?:before|after|instead\s+of|whenever|every\s+time)\s+"
+    r"(?:you\s+)?(?:call|calling|use|using|invoke|invoking|run|running|execute|executing)\s+"
+    r"[`'\"(]*([a-zA-Z][a-zA-Z0-9_.:/-]{2,63})[`'\")]*"
+)
+
+_SHADOW_COERCIVE_CUE_RE = re.compile(
+    r"(?i)\b(?:always|must|required\s+to|make\s+sure\s+to|first\s+pass|also\s+call|"
+    r"also\s+send|forward|bcc|cc|exfiltrate|override|reroute|redirect|include\s+the\s+contents)\b"
+)
+
+_SENSITIVE_TARGET_TOOLS = frozenset({
+    "send_email",
+    "send_message",
+    "write_file",
+    "edit_file",
+    "read_file",
+    "delete_file",
+    "push_files",
+    "create_or_update_file",
+    "execute_command",
+    "run_command",
+    "bash",
+    "shell",
+    "curl",
+    "fetch",
+    "http_request",
+    "postgres_query",
+    "execute_sql",
+})
+
+
+def _collect_schema_texts(node: Any, out: list[str]) -> None:
+  if isinstance(node, dict):
+    for k, v in node.items():
+      if k in ("description", "title") and isinstance(v, str) and v.strip():
+        out.append(v)
+      elif isinstance(v, (dict, list)):
+        _collect_schema_texts(v, out)
+  elif isinstance(node, list):
+    for item in node:
+      _collect_schema_texts(item, out)
+
+
+def detect_tool_shadowing(
+    tool: dict[str, Any], sibling_tool_names: set[str] | None = None
+) -> list[str]:
+  """Detects cross-tool shadowing, covert concealment, and host-credential exfiltration directives in a tool schema."""
+  if not isinstance(tool, dict):
+    return []
+  own_name = str(tool.get("name", "")).strip().lower()
+  siblings = {
+      s.strip().lower()
+      for s in (sibling_tool_names or set())
+      if isinstance(s, str) and s.strip() and s.strip().lower() != own_name
+  }
+  texts: list[str] = []
+  if isinstance(tool.get("description"), str) and tool["description"].strip():
+    texts.append(tool["description"])
+  if isinstance(tool.get("inputSchema"), dict):
+    _collect_schema_texts(tool["inputSchema"], texts)
+  if not texts:
+    return []
+
+  joined = "\n".join(texts)
+  reasons: list[str] = []
+
+  conceal_match = _SHADOW_CONCEALMENT_RE.search(joined)
+  if conceal_match is not None:
+    reasons.append(f"covert user-concealment directive ('{conceal_match.group(0).strip()}')")
+
+  file_match = _SHADOW_SENSITIVE_FILE_RE.search(joined)
+  if file_match is not None:
+    reasons.append("host credential file exfiltration instruction")
+
+  for m in _SHADOW_CROSS_TOOL_RE.finditer(joined):
+    target_raw = m.group(1).strip("`'\".,;:()")
+    target_low = target_raw.lower()
+    if not target_low or target_low == own_name or target_low in ("this", "endpoint", "tool", "api", "function"):
+      continue
+    window_start = max(0, m.start() - 40)
+    window_end = min(len(joined), m.end() + 140)
+    context_slice = joined[window_start:window_end]
+    is_known_target = target_low in siblings or target_low in _SENSITIVE_TARGET_TOOLS
+    if is_known_target and _SHADOW_COERCIVE_CUE_RE.search(context_slice):
+      reasons.append(f"coercive cross-tool shadowing targeting '{target_raw}'")
+      break
+
+  return reasons
+
+
 def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
   """Profiles token footprint, dialect hazards, and tool-poisoning / secret risks across MCP tools."""
   from .guard import SecretGuard
@@ -2165,6 +2292,11 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
   stats_lazy.schema_tokens_before = stats_std.schema_tokens_before
 
   slim_by_name = {t.get("name", ""): t for t in slimmed_tools}
+  sibling_names = {
+      str(t.get("name"))
+      for t in tools
+      if isinstance(t, dict) and isinstance(t.get("name"), str)
+  }
   findings: list[dict[str, Any]] = []
   per_tool: list[dict[str, Any]] = []
 
@@ -2196,6 +2328,7 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
         if k not in ("prompt_injection", "unicode_smuggling", "markdown_exfil_beacon")
         and v > 0
     }
+    shadow_reasons = detect_tool_shadowing(raw_t, sibling_tool_names=sibling_names)
 
     if poison_count > 0:
       findings.append({
@@ -2215,6 +2348,16 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
           "tool": name,
           "message": (
               f"Tool '{name}' embeds credential material in schema metadata ({cats_str})."
+          ),
+      })
+    if shadow_reasons:
+      findings.append({
+          "rule_id": "MS008",
+          "level": "error",
+          "tool": name,
+          "message": (
+              f"Tool '{name}' exhibits cross-tool shadowing hazard: "
+              f"{'; '.join(shadow_reasons)}."
           ),
       })
     if has_ref:
@@ -2246,6 +2389,7 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
         "has_root_union": has_root_union,
         "read_only": slimmer.is_read_only_tool(name, tool=raw_t),
         "security_categories": cats,
+        "shadowing_hazards": shadow_reasons,
     })
 
   std_pct = round(
@@ -2265,7 +2409,7 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
       1,
   )
   security_findings = sum(
-      1 for f in findings if f["rule_id"] in ("MS001", "MS002")
+      1 for f in findings if f["rule_id"] in ("MS001", "MS002", "MS008")
   )
   return {
       "tool_count": len(per_tool),
@@ -2573,16 +2717,239 @@ def audit_resources_manifest(
   }
 
 
+_ELICITATION_CREDENTIAL_RE = re.compile(
+    r"(?i)(?:^|[^a-z0-9])(?:"
+    r"password|passphrase|passwd"
+    r"|api[_\s-]?key|secret[_\s-]?key|client[_\s-]?secret"
+    r"|access[_\s-]?token|refresh[_\s-]?token|bearer[_\s-]?token|auth[_\s-]?token"
+    r"|session[_\s-]?token|github[_\s-]?token|hf[_\s-]?token|slack[_\s-]?token"
+    r"|openai[_\s-]?key|anthropic[_\s-]?key|aws[_\s-]?secret"
+    r"|private[_\s-]?key|ssh[_\s-]?key"
+    r"|seed[_\s-]?phrase|recovery[_\s-]?phrase|mnemonic"
+    r"|totp|otp(?:\s+code|[_-]code)?|2fa(?:\s+code|[_-]code)?|two[_\s-]?factor"
+    r"|card[_\s-]?number|credit[_\s-]?card|cvv|cvc|ssn"
+    r")(?:$|[^a-z0-9])"
+)
+
+_ELICITATION_PHISHING_URL_RE = re.compile(
+    r"(?i)https?://[^\s)\"'>]+(?:/|\b)(?:login|signin|sign-in|oauth|authorize|verify|reauth|credentials|passwd|token)\b[^\s)\"'>]*"
+)
+
+
+def _scan_elicitation_schema_fields(
+    schema: Any, prefix: str, credential_fields: list[str]
+) -> None:
+  if not isinstance(schema, dict):
+    return
+  props = schema.get("properties")
+  if isinstance(props, dict):
+    for prop_name, prop_def in props.items():
+      if not isinstance(prop_name, str):
+        continue
+      field_path = f"{prefix}.{prop_name}" if prefix else prop_name
+      matched = bool(_ELICITATION_CREDENTIAL_RE.search(prop_name))
+      if not matched and isinstance(prop_def, dict):
+        fmt = str(prop_def.get("format", "")).strip().lower()
+        if fmt in ("password", "secret", "credential"):
+          matched = True
+        else:
+          for meta_key in ("title", "description"):
+            meta_val = prop_def.get(meta_key)
+            if isinstance(meta_val, str) and _ELICITATION_CREDENTIAL_RE.search(meta_val):
+              matched = True
+              break
+      if matched and field_path not in credential_fields:
+        credential_fields.append(field_path)
+      if isinstance(prop_def, dict):
+        _scan_elicitation_schema_fields(prop_def, field_path, credential_fields)
+
+
+def audit_elicitation_request(params: dict[str, Any]) -> dict[str, Any]:
+  """Audits a server-initiated MCP `elicitation/create` request for credential phishing and smuggling (`MS007`)."""
+  from .guard import SecretGuard
+
+  if not isinstance(params, dict):
+    return {
+        "allowed": False,
+        "risk_level": "error",
+        "credential_fields": [],
+        "phishing_urls": [],
+        "security_categories": {},
+        "security_findings": 1,
+        "findings": [{
+            "rule_id": "MS007",
+            "level": "error",
+            "tool": "elicitation/create",
+            "kind": "malformed_elicitation",
+            "message": "Server-initiated elicitation/create params must be a JSON object.",
+        }],
+    }
+
+  message = str(params.get("message", "")) if isinstance(params.get("message"), str) else ""
+  req_schema = params.get("requestedSchema")
+  credential_fields: list[str] = []
+  if isinstance(req_schema, dict):
+    _scan_elicitation_schema_fields(req_schema, "", credential_fields)
+
+  if message and _ELICITATION_CREDENTIAL_RE.search(message) and "__message__" not in credential_fields:
+    credential_fields.append("__message__")
+
+  phishing_urls = (
+      [m.group(0) for m in _ELICITATION_PHISHING_URL_RE.finditer(message)]
+      if message
+      else []
+  )
+
+  sec_guard = SecretGuard(enabled=True)
+  sec_guard.redact_value(params, force_redact=True)
+  cats = dict(sec_guard.report.by_category)
+
+  findings: list[dict[str, Any]] = []
+  reasons: list[str] = []
+  if credential_fields:
+    shown_fields = [f for f in credential_fields if f != "__message__"] or ["message"]
+    reasons.append(f"credential solicitation fields ({', '.join(shown_fields)})")
+  if phishing_urls:
+    reasons.append(f"external auth/phishing URL ({phishing_urls[0]})")
+  if cats:
+    cats_str = ", ".join(sorted(f"{k}:{v}" for k, v in cats.items()))
+    reasons.append(f"smuggling/injection/secret markers ({cats_str})")
+
+  if reasons:
+    findings.append({
+        "rule_id": "MS007",
+        "level": "error",
+        "tool": "elicitation/create",
+        "kind": "credential_phishing_or_smuggling",
+        "message": (
+            "Server-initiated elicitation/create blocked for security hazard: "
+            f"{'; '.join(reasons)}."
+        ),
+    })
+
+  slimmer = SchemaSlimmer()
+  compacted_schema = (
+      slimmer.slim_schema_node(req_schema, is_root=True)
+      if isinstance(req_schema, dict)
+      else {}
+  )
+
+  return {
+      "allowed": len(findings) == 0,
+      "risk_level": "error" if findings else "clean",
+      "credential_fields": credential_fields,
+      "phishing_urls": phishing_urls,
+      "security_categories": cats,
+      "security_findings": len(findings),
+      "findings": findings,
+      "compacted_schema": compacted_schema,
+  }
+
+
+class ElicitationGuard:
+  """Firewall for server-initiated MCP `elicitation/create` user-prompt dialogs."""
+
+  def __init__(
+      self,
+      *,
+      block_all: bool = False,
+      block_credential_phishing: bool = True,
+  ) -> None:
+    self.block_all = block_all
+    self.block_credential_phishing = block_credential_phishing
+
+  def evaluate(self, params: Any) -> dict[str, Any]:
+    if self.block_all:
+      return {
+          "allowed": False,
+          "mode": "policy_error",
+          "reason": (
+              "[mcp-slim] Server-initiated elicitation/create is blocked by "
+              "proxy policy (--block-elicitation)."
+          ),
+          "audit": None,
+      }
+    audit = audit_elicitation_request(params if isinstance(params, dict) else {})
+    if self.block_credential_phishing and not audit["allowed"]:
+      reason_msg = (
+          audit["findings"][0]["message"]
+          if audit["findings"]
+          else "Server-initiated elicitation/create blocked by ElicitationGuard."
+      )
+      return {
+          "allowed": False,
+          "mode": "decline",
+          "reason": f"[mcp-slim] {reason_msg}",
+          "audit": audit,
+      }
+    return {
+        "allowed": True,
+        "mode": "forward",
+        "reason": None,
+        "audit": audit,
+    }
+
+
+class RootsPrivacyGuard:
+  """Filters client `roots/list` workspace directory disclosures sent to upstream MCP servers."""
+
+  def __init__(
+      self,
+      *,
+      block_all: bool = False,
+      allow_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+      deny_prefixes: set[str] | list[str] | tuple[str, ...] | None = None,
+  ) -> None:
+    self.block_all = block_all
+    self.uri_guard = ResourceUriGuard(
+        allow_prefixes=allow_prefixes,
+        deny_prefixes=deny_prefixes,
+        block_traversal=True,
+    )
+
+  @property
+  def enabled(self) -> bool:
+    return self.block_all or self.uri_guard.has_prefix_policy
+
+  def filter_roots(
+      self, roots: list[Any], stats: SlimStats | None = None
+  ) -> list[dict[str, Any]]:
+    if self.block_all:
+      if stats is not None:
+        stats.roots_filtered += sum(1 for r in roots if isinstance(r, dict))
+      return []
+    kept: list[dict[str, Any]] = []
+    for item in roots:
+      if not isinstance(item, dict):
+        continue
+      uri = item.get("uri")
+      if not isinstance(uri, str) or self.uri_guard.validate_uri(uri) is not None:
+        if stats is not None:
+          stats.roots_filtered += 1
+        continue
+      canon_uri, _ = canonicalize_resource_uri(uri)
+      clean_root = dict(item)
+      if canon_uri:
+        clean_root["uri"] = canon_uri
+      kept.append(clean_root)
+    return kept
+
+
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.2.0",
+    version: str = "1.3.0",
 ) -> dict[str, Any]:
-  """Formats an `audit_tools_manifest`, `diff_tools_manifests`, or `audit_resources_manifest` report as OASIS SARIF v2.1.0."""
+  """Formats an `audit_tools_manifest`, `diff_tools_manifests`, `audit_resources_manifest`, or `audit_elicitation_request` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []
   for f in report.get("findings", []):
     loc_name = str(f.get("tool") or f.get("uri") or "mcp")
-    loc_kind = "resource" if f.get("rule_id") == "MS006" else "function"
+    if f.get("rule_id") == "MS006":
+      loc_kind = "resource"
+    elif f.get("rule_id") == "MS007":
+      loc_kind = "elicitation"
+    else:
+      loc_kind = "function"
     results.append({
         "ruleId": f["rule_id"],
         "level": f["level"],

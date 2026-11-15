@@ -58,10 +58,10 @@
   <text class="val" x="383" y="345">3,864 tok</text>
   <text class="badge" x="836" y="335" text-anchor="end">-47.3%</text>
   <text class="label" x="24" y="392">Combined Workspace (60 tools + call)</text>
-  <text class="sublabel" x="24" y="410">57,470 B -&gt; 29,438 B wire</text>
+  <text class="sublabel" x="24" y="410">57,470 B -&gt; 28,896 B wire</text>
   <rect x="265" y="378" width="410" height="18" rx="3" fill="#30363d"/>
   <text class="val-dim" x="683" y="391">14,364 tok</text>
-  <rect x="265" y="400" width="209" height="18" rx="3" fill="#238636"/>
-  <text class="val" x="482" y="413">7,354 tok</text>
-  <text class="badge" x="836" y="403" text-anchor="end">-48.8%</text>
+  <rect x="265" y="400" width="206" height="18" rx="3" fill="#238636"/>
+  <text class="val" x="479" y="413">7,218 tok</text>
+  <text class="badge" x="836" y="403" text-anchor="end">-49.7%</text>
 </svg>

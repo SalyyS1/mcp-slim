@@ -50,11 +50,11 @@
       "name": "Combined Workspace (60 tools + call)",
       "tools_count": 60,
       "before_tokens": 14364,
-      "after_tokens": 7354,
-      "saved_tokens": 7010,
-      "reduction_pct": 48.8,
+      "after_tokens": 7218,
+      "saved_tokens": 7146,
+      "reduction_pct": 49.7,
       "raw_bytes": 57470,
-      "slim_bytes": 29438
+      "slim_bytes": 28896
     }
   ],
   "latency_and_throughput": [
@@ -62,49 +62,49 @@
       "stage": "SecretGuard.redact_text",
       "payload_desc": "7,450 B JSON-RPC payload (12 rules)",
       "iterations": 5000,
-      "p50_us": 169.3,
-      "p95_us": 222.8,
-      "p99_us": 256.8,
-      "mean_us": 167.8,
-      "msg_per_sec": 5910.3,
-      "mb_per_sec": 41.99,
-      "peak_mem_kib": 22.2
+      "p50_us": 267.2,
+      "p95_us": 364.3,
+      "p99_us": 397.5,
+      "mean_us": 280.6,
+      "msg_per_sec": 3546.9,
+      "mb_per_sec": 25.2,
+      "peak_mem_kib": 29.6
     },
     {
       "stage": "SchemaSlimmer.slim_tools_list",
       "payload_desc": "mcp-server-git (14 tools, 7,639 B)",
       "iterations": 5000,
-      "p50_us": 705.4,
-      "p95_us": 815.5,
-      "p99_us": 927.9,
-      "mean_us": 708.2,
-      "msg_per_sec": 1408.4,
-      "mb_per_sec": 11.03,
-      "peak_mem_kib": 4.7
+      "p50_us": 1050.8,
+      "p95_us": 1352.7,
+      "p99_us": 1459.3,
+      "mean_us": 1061.2,
+      "msg_per_sec": 940.6,
+      "mb_per_sec": 7.37,
+      "peak_mem_kib": 11.7
     },
     {
       "stage": "OutputSlimmer.slim_call_result",
       "payload_desc": "12-repo JSON result (3,940 B)",
       "iterations": 5000,
-      "p50_us": 463.6,
-      "p95_us": 583.4,
-      "p99_us": 694.9,
-      "mean_us": 471.8,
-      "msg_per_sec": 2113.3,
-      "mb_per_sec": 15.01,
-      "peak_mem_kib": 17.1
+      "p50_us": 690.4,
+      "p95_us": 871.5,
+      "p99_us": 942.2,
+      "mean_us": 697.2,
+      "msg_per_sec": 1431.2,
+      "mb_per_sec": 10.17,
+      "peak_mem_kib": 16.6
     },
     {
       "stage": "MCPProxy Full JSON-RPC Turn",
       "payload_desc": "Request + Response + Slim + Guard",
       "iterations": 5000,
-      "p50_us": 984.5,
-      "p95_us": 1262.5,
-      "p99_us": 1436.7,
-      "mean_us": 989.5,
-      "msg_per_sec": 1008.7,
-      "mb_per_sec": 7.24,
-      "peak_mem_kib": 24.4
+      "p50_us": 3623.4,
+      "p95_us": 4691.0,
+      "p99_us": 5097.1,
+      "mean_us": 3688.9,
+      "msg_per_sec": 270.8,
+      "mb_per_sec": 1.94,
+      "peak_mem_kib": 25.8
     }
   ]
 }
