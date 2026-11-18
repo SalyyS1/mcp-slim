@@ -709,14 +709,17 @@ class ToolCallStreamSanitizer:
       overlap_chars: int = 160,
       max_call_chars: int = 262_144,
       max_active_calls: int = 256,
+      repair_truncated_json: bool = False,
   ) -> None:
     self.guard = guard if guard is not None else SecretGuard()
     self.overlap_chars = overlap_chars
     self.max_call_chars = max(1024, int(max_call_chars))
     self.max_active_calls = max(8, int(max_active_calls))
+    self.repair_truncated_json = repair_truncated_json
     self._calls: dict[str | int, dict[str, Any]] = {}
     self.deltas_processed: int = 0
     self.calls_completed: int = 0
+    self.json_repairs: int = 0
 
   @property
   def active_calls(self) -> int:
@@ -785,6 +788,7 @@ class ToolCallStreamSanitizer:
       *,
       schema_slimmer: Any | None = None,
       stats: Any | None = None,
+      repair_json: bool | None = None,
   ) -> dict[str, Any]:
     """Flushes `call_id`, decodes JSON, scrubs decoded values/escapes, and coerces/validates."""
     state = self._calls.pop(call_id, None)
@@ -795,6 +799,8 @@ class ToolCallStreamSanitizer:
           "arguments": {},
           "sanitized_json": "{}",
           "is_valid_json": True,
+          "repaired": False,
+          "repairs_applied": [],
           "validation_error": None,
       }
 
@@ -806,6 +812,8 @@ class ToolCallStreamSanitizer:
           "arguments": None,
           "sanitized_json": "",
           "is_valid_json": False,
+          "repaired": False,
+          "repairs_applied": [],
           "validation_error": (
               f"[mcp-slim] Streaming tool-call arguments for '{tool_name or call_id}' "
               f"exceeded max_call_chars ({self.max_call_chars})."
@@ -818,20 +826,53 @@ class ToolCallStreamSanitizer:
     assembled = "".join(state["parts"]).strip()
     self.calls_completed += 1
 
+    repaired_flag = False
+    repairs_applied: list[str] = []
+    should_repair = (
+        self.repair_truncated_json if repair_json is None else bool(repair_json)
+    )
+
     if not assembled:
       parsed: Any = {}
     else:
       try:
         parsed = json.loads(assembled)
       except json.JSONDecodeError as exc:
-        return {
-            "call_id": call_id,
-            "tool_name": tool_name,
-            "arguments": None,
-            "sanitized_json": assembled,
-            "is_valid_json": False,
-            "validation_error": f"Malformed tool-call arguments JSON: {exc.msg}",
-        }
+        if should_repair:
+          from ._ms015_ms016 import ToolCallJsonRepairer  # noqa: PLC0415
+
+          rep_res = ToolCallJsonRepairer(require_object_root=True).repair(assembled)
+          if rep_res.is_valid and isinstance(rep_res.value, dict):
+            parsed = rep_res.value
+            repaired_flag = rep_res.repaired
+            repairs_applied = list(rep_res.repairs_applied)
+            if repaired_flag:
+              self.json_repairs += 1
+              if stats is not None and hasattr(stats, "json_repairs"):
+                stats.json_repairs += 1
+          else:
+            return {
+                "call_id": call_id,
+                "tool_name": tool_name,
+                "arguments": None,
+                "sanitized_json": assembled,
+                "is_valid_json": False,
+                "repaired": False,
+                "repairs_applied": list(rep_res.repairs_applied),
+                "validation_error": rep_res.error
+                or f"Malformed tool-call arguments JSON: {exc.msg}",
+            }
+        else:
+          return {
+              "call_id": call_id,
+              "tool_name": tool_name,
+              "arguments": None,
+              "sanitized_json": assembled,
+              "is_valid_json": False,
+              "repaired": False,
+              "repairs_applied": [],
+              "validation_error": f"Malformed tool-call arguments JSON: {exc.msg}",
+          }
 
     if not isinstance(parsed, dict):
       return {
@@ -840,6 +881,8 @@ class ToolCallStreamSanitizer:
           "arguments": None,
           "sanitized_json": assembled,
           "is_valid_json": False,
+          "repaired": repaired_flag,
+          "repairs_applied": repairs_applied,
           "validation_error": "Tool-call arguments must decode to a JSON object.",
       }
 
@@ -865,5 +908,7 @@ class ToolCallStreamSanitizer:
         "arguments": sanitized_args,
         "sanitized_json": canonical_json,
         "is_valid_json": True,
+        "repaired": repaired_flag,
+        "repairs_applied": repairs_applied,
         "validation_error": validation_err,
     }

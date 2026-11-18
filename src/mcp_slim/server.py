@@ -10,10 +10,12 @@ from typing import Any
 from . import __version__
 from .guard import SecretGuard, StreamSanitizer
 from .slimmer import (
+    CompositeSchemaMerger,
     OutputSlimmer,
     SchemaSlimmer,
     SlimStats,
     TokenWindowGovernor,
+    ToolCallJsonRepairer,
     audit_elicitation_request,
     audit_resources_manifest,
     audit_tools_manifest,
@@ -216,6 +218,52 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 }
             },
             "required": ["params"],
+        },
+    },
+    {
+        "name": "repair_tool_call_json",
+        "description": (
+            "Structurally repair truncated or lightly malformed streaming MCP tool-call "
+            "JSON arguments (MS015) and scrub embedded secrets."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "raw_json": {
+                    "type": "string",
+                    "description": "Truncated or malformed JSON string from a streaming tool call.",
+                },
+                "require_object_root": {
+                    "type": "boolean",
+                    "description": "Require the repaired JSON value to be a root object (default true).",
+                },
+            },
+            "required": ["raw_json"],
+        },
+    },
+    {
+        "name": "merge_mcp_manifests",
+        "description": (
+            "Merge multiple upstream MCP tools/list server manifests into a unified "
+            "catalog with tool-name collision resolution and shared $defs disambiguation (MS016)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "servers": {
+                    "type": "object",
+                    "description": "Mapping of server_id to array of MCP tool definitions.",
+                },
+                "strategy": {
+                    "type": "string",
+                    "description": "Collision strategy: prefix_colliding (default), prefix_all, merge_identical, or first_wins.",
+                },
+                "slim_schemas": {
+                    "type": "boolean",
+                    "description": "Compact merged tool schemas with SchemaSlimmer.",
+                },
+            },
+            "required": ["servers"],
         },
     },
     {
@@ -487,6 +535,64 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
           "jsonrpc": "2.0",
           "id": msg_id,
           "result": _text_result(audit_elicitation_request(el_params)),
+      }
+
+    if name == "repair_tool_call_json":
+      raw_json = args.get("raw_json")
+      if not isinstance(raw_json, str):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'raw_json' must be a string.", is_error=True),
+        }
+      req_obj = bool(args.get("require_object_root", True))
+      repairer = ToolCallJsonRepairer(require_object_root=req_obj)
+      rep_res = repairer.repair(raw_json)
+      guard = SecretGuard(enabled=True)
+      sanitized_val = guard.redact_value(rep_res.value) if rep_res.is_valid else None
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result({
+              "is_valid": rep_res.is_valid,
+              "repaired": rep_res.repaired,
+              "repairs_applied": rep_res.repairs_applied,
+              "value": sanitized_val,
+              "repaired_json": (
+                  json.dumps(sanitized_val, ensure_ascii=False, separators=(",", ":"))
+                  if rep_res.is_valid
+                  else rep_res.repaired_json
+              ),
+              "secrets_redacted": guard.report.total_redactions,
+              "error": rep_res.error,
+          }),
+      }
+
+    if name == "merge_mcp_manifests":
+      servers_map = args.get("servers")
+      if not isinstance(servers_map, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'servers' must be a JSON object.", is_error=True),
+        }
+      strategy = str(args.get("strategy", "prefix_colliding") or "prefix_colliding")
+      try:
+        merger = CompositeSchemaMerger(
+            strategy=strategy,
+            slim_schemas=bool(args.get("slim_schemas", False)),
+        )
+      except ValueError as exc:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(str(exc), is_error=True),
+        }
+      merged_res = merger.merge(servers_map)
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(merged_res.to_audit_report()),
       }
 
     if name == "get_slim_stats":

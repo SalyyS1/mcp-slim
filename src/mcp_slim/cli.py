@@ -14,6 +14,7 @@ from .guard import SecretGuard
 from .proxy import MCPProxy
 from .server import run_serve
 from .slimmer import (
+    CompositeSchemaMerger,
     LazyToolBroker,
     LatencyHistogram,
     OutputSlimmer,
@@ -510,6 +511,101 @@ def run_diff(
   return 0
 
 
+def run_merge(
+    inputs: list[str],
+    *,
+    strategy: str = "prefix_colliding",
+    separator: str = "__",
+    slim: bool = False,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+    fail_on_conflict: bool = False,
+) -> int:
+  server_manifests: dict[str, list[dict[str, Any]]] = {}
+  for spec in inputs:
+    if "=" in spec:
+      srv_id, raw_path = spec.split("=", 1)
+      path = Path(raw_path)
+      explicit_id: str | None = srv_id.strip() or path.stem
+    else:
+      path = Path(spec)
+      explicit_id = None
+
+    if not path.exists():
+      sys.stderr.write(f"Manifest file not found: {path}\n")
+      return 1
+    raw_data = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        explicit_id is None
+        and isinstance(raw_data, dict)
+        and isinstance(raw_data.get("servers"), dict)
+    ):
+      for sub_srv, sub_tools in raw_data["servers"].items():
+        if isinstance(sub_tools, list):
+          server_manifests[str(sub_srv)] = sub_tools
+      continue
+
+    loaded = _load_tools_file(path)
+    if loaded is None:
+      sys.stderr.write(f"Could not locate a tools list inside {path}\n")
+      return 1
+    srv_key = explicit_id or path.stem
+    if srv_key in server_manifests:
+      idx = 2
+      while f"{srv_key}_{idx}" in server_manifests:
+        idx += 1
+      srv_key = f"{srv_key}_{idx}"
+    server_manifests[srv_key] = loaded
+
+  merger = CompositeSchemaMerger(
+      strategy=strategy,
+      separator=separator,
+      slim_schemas=slim,
+  )
+  merged = merger.merge(server_manifests)
+  report = merged.to_audit_report()
+
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri="composite_manifest.json",
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+  else:
+    print(
+        f"mcp-slim Composite Schema Merge ({merged.servers_merged} server(s), strategy={strategy})"
+    )
+    print("=" * 78)
+    print(
+        f"Tools: {merged.tools_input} -> {merged.tools_output} | "
+        f"Collisions: {merged.tool_collisions} | "
+        f"Deduped Tools: {merged.deduplicated_tools} | "
+        f"Shared $defs Deduped: {merged.shared_defs_deduped} | "
+        f"$defs Conflicts Resolved: {merged.def_conflicts_resolved}"
+    )
+    print(
+        f"Tokens: {merged.tokens_before} -> {merged.tokens_after} "
+        f"(-{merged.reduction_pct}%)"
+    )
+    if merged.conflicts:
+      print("-" * 78)
+      for c in merged.conflicts:
+        print(f"[{c['rule_id']}:{c['level'].upper()}] {c['message']}")
+    print("=" * 78)
+
+  if fail_on_conflict and merged.has_conflicts:
+    return 2
+  return 0
+
+
 async def _inspect_stdio_server(command: list[str], timeout: float = 15.0) -> list[dict[str, Any]]:
   """Spawns a live MCP stdio server, performs initialize + tools/list handshake, and returns tools."""
   proc = await asyncio.create_subprocess_exec(
@@ -672,6 +768,7 @@ def wrap_config(
     deny_resource_prefixes: str | None = None,
     token_budget: int = 0,
     window_decay: float = 0.85,
+    repair_truncated_json: bool = False,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -717,6 +814,8 @@ def wrap_config(
       prefix.extend(["--token-budget", str(token_budget)])
       if window_decay != 0.85:
         prefix.extend(["--window-decay", str(window_decay)])
+    if repair_truncated_json:
+      prefix.append("--repair-truncated-json")
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -843,6 +942,11 @@ def main(argv: list[str] | None = None) -> int:
       "--detect-replay",
       action="store_true",
       help="Detect server-side result substitution attacks (MS010): alert when the same tool returns identical result fingerprints for different arguments",
+  )
+  run_p.add_argument(
+      "--repair-truncated-json",
+      action="store_true",
+      help="Structurally repair truncated or lightly malformed streaming tool-call JSON arguments (MS015)",
   )
   run_p.add_argument(
       "--block-roots",
@@ -1052,6 +1156,11 @@ def main(argv: list[str] | None = None) -> int:
       help="Decay factor [0.0..1.0] paired with --token-budget when wrapping mcpServers (default: 0.85)",
   )
   wrap_p.add_argument(
+      "--repair-truncated-json",
+      action="store_true",
+      help="Wrap servers with --repair-truncated-json structural JSON repair",
+  )
+  wrap_p.add_argument(
       "--runner",
       choices=("mcp-slim", "uvx", "npx"),
       default="mcp-slim",
@@ -1114,6 +1223,50 @@ def main(argv: list[str] | None = None) -> int:
       "--allow-new-tools",
       action="store_true",
       help="Treat newly added tools as non-blocking notes",
+  )
+
+  merge_p = sub.add_parser(
+      "merge",
+      help="Merge multiple MCP tools JSON manifests into a unified composite catalog with collision and $defs resolution",
+  )
+  merge_p.add_argument(
+      "inputs",
+      nargs="+",
+      help="Manifest paths or server_id=path specs (or a multi-server {'servers': ...} JSON file)",
+  )
+  merge_p.add_argument(
+      "--strategy",
+      choices=("prefix_colliding", "prefix_all", "merge_identical", "first_wins"),
+      default="prefix_colliding",
+      help="Cross-server tool-name collision resolution strategy (default: prefix_colliding)",
+  )
+  merge_p.add_argument(
+      "--separator",
+      type=str,
+      default="__",
+      help="Namespace separator between server_id and tool_name (default: __)",
+  )
+  merge_p.add_argument(
+      "--slim",
+      action="store_true",
+      help="Compact merged tool schemas with SchemaSlimmer",
+  )
+  merge_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON composite merge report",
+  )
+  merge_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
+  )
+  merge_p.add_argument(
+      "--fail-on-conflict",
+      action="store_true",
+      help="Exit with code 2 when MS016 tool collisions or conflicting $defs schemas are detected",
   )
 
   inspect_p = sub.add_parser(
@@ -1221,6 +1374,17 @@ def main(argv: list[str] | None = None) -> int:
         allow_new_tools=parsed.allow_new_tools,
     )
 
+  if parsed.subcommand == "merge":
+    return run_merge(
+        list(parsed.inputs),
+        strategy=parsed.strategy,
+        separator=parsed.separator,
+        slim=parsed.slim,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+        fail_on_conflict=parsed.fail_on_conflict,
+    )
+
   if parsed.subcommand == "inspect":
     cmd = list(parsed.command)
     if cmd and cmd[0] == "--":
@@ -1246,6 +1410,7 @@ def main(argv: list[str] | None = None) -> int:
         deny_resource_prefixes=parsed.deny_resource_prefixes,
         token_budget=parsed.token_budget,
         window_decay=parsed.window_decay,
+        repair_truncated_json=parsed.repair_truncated_json,
     )
 
   if parsed.subcommand == "bridge":
@@ -1321,6 +1486,7 @@ def main(argv: list[str] | None = None) -> int:
         allow_credential_elicitation=parsed.allow_credential_elicitation,
         block_result_injection=parsed.block_result_injection,
         detect_replay=parsed.detect_replay,
+        repair_truncated_json=parsed.repair_truncated_json,
         block_roots=parsed.block_roots,
         allow_root_prefixes=allow_root_set,
         deny_root_prefixes=deny_root_set,

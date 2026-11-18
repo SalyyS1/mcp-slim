@@ -1,5 +1,5 @@
-# mcp-slim (v1.3.0)
-> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% tokens), Server-Initiated Elicitation Phishing Firewall (`MS007` / `--block-elicitation`), Workspace `roots/list` Privacy Boundaries (`--block-roots` / `--allow-root-prefixes`), Cross-Tool Shadowing Detection (`MS008`), Sliding Exponential Token-Window Budgets (`--token-budget`), Streaming Sanitization, `$defs/$ref` Inlining, Rug-Pull Schema Pinning (`--pin-schemas`), and Real-Time Secret Redaction (~0.93 ms p50).
+# mcp-slim (v1.8.0)
+> Zero-Dependency MCP JSON-RPC 2.0 Stdio Proxy for Context Compression (-48.8% to -98.7% tokens), Streaming Tool-Call JSON Repair (`MS015` / `--repair-truncated-json`), Multi-Server Composite Schema Merging (`MS016` / `mcp-slim merge`), Recursive `$ref` Depth Guard (`MS013`), Elicitation Phishing Firewall (`MS007`), Workspace `roots/list` Privacy Boundaries (`--block-roots`), Cross-Tool Shadowing Detection (`MS008`), Sliding Exponential Token-Window Budgets (`--token-budget`), Rug-Pull Schema Pinning (`--pin-schemas`), and Real-Time Secret Redaction (~0.93 ms p50).
 
 - Repository: https://github.com/SalyyS1/mcp-slim
 - Live Interactive Playground: https://salyys1.github.io/mcp-slim/
@@ -8,7 +8,8 @@
 - Zero-Install (uvx): `uvx --from git+https://github.com/SalyyS1/mcp-slim mcp-slim --benchmark`
 - Zero-Install (npx): `npx -y github:SalyyS1/mcp-slim --benchmark`
 - Install (pip): `pip install git+https://github.com/SalyyS1/mcp-slim.git`
-- Wrap Config: `mcp-slim wrap --pin-schemas -i ~/.cursor/mcp.json`
+- Wrap Config: `mcp-slim wrap --pin-schemas --repair-truncated-json -i ~/.cursor/mcp.json`
+- Merge Multi-Server Manifests: `mcp-slim merge git=git_tools.json fs=fs_tools.json --slim --sarif merge.sarif`
 - Diff Manifests (CI Rug-Pull Gate): `mcp-slim diff baseline.json updated.json --fail-on-mutation --sarif diff.sarif`
 - View Savings Ledger: `mcp-slim stats`
 - GitHub Action: `uses: SalyyS1/mcp-slim@main`

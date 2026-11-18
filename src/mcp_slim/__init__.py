@@ -1,6 +1,6 @@
 """mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 from .guard import (
     RedactionReport,
@@ -11,9 +11,13 @@ from .guard import (
 from .proxy import MCPProxy
 from .server import handle_server_rpc, run_serve
 from .slimmer import (
+    AUDIT_SARIF_RULES,
     BranchContract,
     CollisionReport,
+    CompositeMergeResult,
+    CompositeSchemaMerger,
     ElicitationGuard,
+    JsonRepairResult,
     LazyToolBroker,
     LatencyHistogram,
     NamespaceRoutingResult,
@@ -26,6 +30,7 @@ from .slimmer import (
     SlimStats,
     SseChunkDecision,
     SseChunkThrottle,
+    ToolCallJsonRepairer,
     ToolCallReplayGuard,
     ToolNamespaceRouter,
     TokenWindowGovernor,
@@ -43,14 +48,20 @@ from .slimmer import (
     diff_tools_manifests,
     estimate_tokens,
     evaluate_ref_disambiguation,
+    merge_server_manifests,
+    repair_truncated_json,
     scan_tool_result_for_injection,
 )
 from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
 
 __all__ = [
+    "AUDIT_SARIF_RULES",
     "BranchContract",
     "CollisionReport",
+    "CompositeMergeResult",
+    "CompositeSchemaMerger",
     "ElicitationGuard",
+    "JsonRepairResult",
     "LazyToolBroker",
     "LatencyHistogram",
     "MCPProxy",
@@ -70,6 +81,7 @@ __all__ = [
     "StatsLedger",
     "StreamSanitizer",
     "TokenWindowGovernor",
+    "ToolCallJsonRepairer",
     "ToolCallStreamSanitizer",
     "ToolMutation",
     "ToolCallReplayGuard",
@@ -88,6 +100,8 @@ __all__ = [
     "diff_tools_manifests",
     "estimate_tokens",
     "evaluate_ref_disambiguation",
+    "merge_server_manifests",
+    "repair_truncated_json",
     "scan_tool_result_for_injection",
     "handle_server_rpc",
     "run_serve",

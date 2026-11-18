@@ -176,6 +176,7 @@ class SlimStats:
   elicitations_guarded: int = 0
   roots_filtered: int = 0
   ref_hints_preserved: int = 0
+  json_repairs: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -1912,7 +1913,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool schema contains prompt injection directives or invisible Unicode smuggling."
         },
+        "help": {
+            "text": "Strip role-override delimiters, hidden XML directives, and BiDi/Plane-14 Unicode control characters from tool descriptions and parameter schemas."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "prompt-injection"], "security-severity": "9.0"},
     },
     {
         "id": "MS002",
@@ -1920,7 +1925,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool schema embeds a live credential, token, or secret in description/default/examples."
         },
+        "help": {
+            "text": "Remove live API keys, bearer tokens, private keys, and signed URLs from tool schema defaults, descriptions, and examples."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "secret-leakage"], "security-severity": "8.8"},
     },
     {
         "id": "MS003",
@@ -1928,7 +1937,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool inputSchema uses $defs/$ref pointers rejected by Gemini, Vertex AI, and strict endpoints."
         },
+        "help": {
+            "text": "Inline local $defs/$ref JSON Schema pointers via SchemaSlimmer before forwarding tools/list to strict function-calling providers."
+        },
         "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["compatibility", "mcp", "json-schema"]},
     },
     {
         "id": "MS004",
@@ -1936,7 +1949,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool inputSchema uses root anyOf/oneOf object unions rejected by strict function-calling APIs."
         },
+        "help": {
+            "text": "Flatten root object unions with SchemaSlimmer while enforcing branch disjunction contracts on outbound tools/call."
+        },
         "defaultConfiguration": {"level": "note"},
+        "properties": {"tags": ["compatibility", "mcp", "json-schema"]},
     },
     {
         "id": "MS005",
@@ -1944,7 +1961,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool definition mutated description, inputSchema, or safety annotations relative to pinned baseline."
         },
+        "help": {
+            "text": "Enable --pin-schemas at runtime and gate upstream MCP server version bumps with mcp-slim diff --fail-on-mutation."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "rug-pull"], "security-severity": "8.5"},
     },
     {
         "id": "MS006",
@@ -1952,7 +1973,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP resource violates URI prefix policy, contains path traversal, or embeds secrets/prompt injection."
         },
+        "help": {
+            "text": "Restrict accessible URIs with --allow-resource-prefixes / --deny-resource-prefixes and scrub resource payloads with SecretGuard."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "path-traversal"], "security-severity": "8.5"},
     },
     {
         "id": "MS007",
@@ -1960,7 +1985,11 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "Server-initiated MCP elicitation/create request solicits credentials, passphrases, OTP codes, or embeds deceptive smuggling."
         },
+        "help": {
+            "text": "Keep ElicitationGuard active or pass --block-elicitation to reject server-initiated credential prompts."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "phishing"], "security-severity": "9.2"},
     },
     {
         "id": "MS008",
@@ -1968,23 +1997,107 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "shortDescription": {
             "text": "MCP tool description contains cross-tool shadowing, covert concealment, or host-credential exfiltration directives."
         },
+        "help": {
+            "text": "Audit third-party MCP servers with mcp-slim audit --fail-on-security and reject tools attempting to hijack sibling tools or conceal actions."
+        },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "tool-shadowing"], "security-severity": "9.1"},
     },
     {
         "id": "MS009",
         "name": "ToolResultInjection",
         "shortDescription": {
-            "text": "MCP tools/call response content contains prompt-injection directives or invisible Unicode smuggling targeting the LLM context.",
+            "text": "MCP tools/call response content contains prompt-injection directives or invisible Unicode smuggling targeting the LLM context."
+        },
+        "help": {
+            "text": "Enable --block-result-injection and SecretGuard to neutralize indirect prompt-injection payloads in upstream tool responses."
         },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "prompt-injection"], "security-severity": "8.7"},
     },
     {
         "id": "MS010",
         "name": "ToolCallResultReplay",
         "shortDescription": {
-            "text": "MCP server returned an identical result fingerprint for a tools/call with different input arguments, indicating server-side result substitution.",
+            "text": "MCP server returned an identical result fingerprint for a tools/call with different input arguments, indicating server-side result substitution."
+        },
+        "help": {
+            "text": "Enable --detect-replay to flag untrusted MCP servers substituting cached or static payloads across distinct argument invocations."
         },
         "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "integrity"], "security-severity": "7.8"},
+    },
+    {
+        "id": "MS011",
+        "name": "SseChunkBurstThrottled",
+        "shortDescription": {
+            "text": "Streaming SSE chunk volume exceeded configured rolling burst token budget."
+        },
+        "help": {
+            "text": "Tune SseChunkThrottle burst_budget_tokens or paginate verbose streaming tool outputs."
+        },
+        "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["reliability", "mcp", "token-budget"]},
+    },
+    {
+        "id": "MS012",
+        "name": "JsonRpcLatencySloExceeded",
+        "shortDescription": {
+            "text": "JSON-RPC method round-trip latency exceeded target percentile threshold."
+        },
+        "help": {
+            "text": "Inspect per-method p95/p99 latency via LatencyHistogram or --otel-jsonl trace spans and enable --cache-ttl for read-only calls."
+        },
+        "defaultConfiguration": {"level": "note"},
+        "properties": {"tags": ["observability", "mcp", "latency"]},
+    },
+    {
+        "id": "MS013",
+        "name": "ExcessiveJsonSchemaRefDepth",
+        "shortDescription": {
+            "text": "MCP tool inputSchema contains cyclic $ref pointers or nested $ref chains exceeding max_ref_depth."
+        },
+        "help": {
+            "text": "Break self-referential $ref loops or cap recursive schema definitions with RefDepthGuard and SchemaSlimmer."
+        },
+        "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["reliability", "mcp", "json-schema"], "security-severity": "5.5"},
+    },
+    {
+        "id": "MS014",
+        "name": "CrossServerToolNameCollision",
+        "shortDescription": {
+            "text": "Identical MCP tool name exposed by multiple upstream servers without namespace disambiguation."
+        },
+        "help": {
+            "text": "Route multi-server catalogs through ToolNamespaceRouter or CompositeSchemaMerger to namespace colliding tool names."
+        },
+        "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["reliability", "security", "mcp", "namespace"], "security-severity": "6.5"},
+    },
+    {
+        "id": "MS015",
+        "name": "TruncatedToolCallJson",
+        "shortDescription": {
+            "text": "Streaming MCP tool-call JSON arguments arrived truncated or malformed and required structural repair."
+        },
+        "help": {
+            "text": "Enable --repair-truncated-json or ToolCallJsonRepairer to recover truncated max_tokens tool calls safely before schema coercion."
+        },
+        "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["reliability", "mcp", "streaming"]},
+    },
+    {
+        "id": "MS016",
+        "name": "CompositeSchemaMergeConflict",
+        "shortDescription": {
+            "text": "Multi-server MCP manifest merge encountered conflicting tool names or incompatible shared $defs schemas."
+        },
+        "help": {
+            "text": "Use CompositeSchemaMerger (mcp-slim merge) to disambiguate conflicting $defs pointers and generate a deterministic reverse routing table."
+        },
+        "defaultConfiguration": {"level": "warning"},
+        "properties": {"tags": ["reliability", "security", "mcp", "composite-schema"], "security-severity": "6.5"},
     },
 )
 
@@ -2396,9 +2509,19 @@ def detect_tool_shadowing(
   return reasons
 
 
-def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
+def audit_tools_manifest(
+    tools: list[dict[str, Any]],
+    *,
+    max_ref_depth: int | None = 20,
+) -> dict[str, Any]:
   """Profiles token footprint, dialect hazards, and tool-poisoning / secret risks across MCP tools."""
   from .guard import SecretGuard
+
+  depth_guard = (
+      RefDepthGuard(max_ref_depth=max_ref_depth)
+      if max_ref_depth is not None and max_ref_depth >= 1
+      else None
+  )
 
   guard_full = SecretGuard(enabled=True)
   sanitized_tools = guard_full.redact_value(tools)
@@ -2492,6 +2615,17 @@ def audit_tools_manifest(tools: list[dict[str, Any]]) -> dict[str, Any]:
               "Gemini/Vertex compatibility."
           ),
       })
+      if depth_guard is not None and isinstance(in_schema, dict):
+        depth_rep = depth_guard.audit_schema(in_schema, tool_name=name)
+        for dv in depth_rep.violations:
+          findings.append({
+              "rule_id": "MS013",
+              "level": "warning",
+              "tool": name,
+              "path": dv["path"],
+              "depth": dv["depth"],
+              "message": dv["message"],
+          })
     if has_root_union:
       findings.append({
           "rule_id": "MS004",
@@ -3349,49 +3483,139 @@ def evaluate_ref_disambiguation(
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.5.0",
+    version: str | None = None,
+    *,
+    extra_sarif_results: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-  """Formats an `audit_tools_manifest`, `diff_tools_manifests`, `audit_resources_manifest`, or `audit_elicitation_request` report as OASIS SARIF v2.1.0."""
+  """Formats an audit, diff, resource, elicitation, or composite-merge report as OASIS SARIF v2.1.0."""
+  if version is None:
+    from . import __version__ as _pkg_version  # noqa: PLC0415
+
+    eff_version = _pkg_version
+  else:
+    eff_version = version
+
+  rule_index_map = {r["id"]: idx for idx, r in enumerate(AUDIT_SARIF_RULES)}
   results: list[dict[str, Any]] = []
+
+  def _fingerprint(rule_id: str, loc_name: str, msg_text: str) -> str:
+    raw_fp = f"{source_uri}|{rule_id}|{loc_name}|{msg_text}"
+    return hashlib.sha256(raw_fp.encode("utf-8")).hexdigest()[:16]
+
+  _PASSTHROUGH_PROP_KEYS = (
+      "kind",
+      "changed_fields",
+      "baseline_sha256",
+      "current_sha256",
+      "path",
+      "depth",
+      "servers",
+      "resolved_names",
+      "def_name",
+      "repairs_applied",
+      "item_index",
+      "categories",
+      "args_hash",
+      "result_hash",
+  )
+
   for f in report.get("findings", []):
+    rule_id = str(f.get("rule_id") or f.get("rule") or "MS000")
+    lvl = str(f.get("level", "warning"))
+    msg_text = str(f.get("message", ""))
     loc_name = str(f.get("tool") or f.get("uri") or "mcp")
-    if f.get("rule_id") == "MS006":
+    if rule_id == "MS006":
       loc_kind = "resource"
-    elif f.get("rule_id") == "MS007":
+    elif rule_id == "MS007":
       loc_kind = "elicitation"
     else:
       loc_kind = "function"
-    results.append({
-        "ruleId": f["rule_id"],
-        "level": f["level"],
-        "message": {"text": f["message"]},
+    logical_loc: dict[str, Any] = {"name": loc_name, "kind": loc_kind}
+    if isinstance(f.get("path"), str) and f["path"]:
+      logical_loc["decoratedName"] = f["path"]
+
+    entry: dict[str, Any] = {
+        "ruleId": rule_id,
+        "level": lvl,
+        "message": {"text": msg_text},
         "locations": [
             {
                 "physicalLocation": {
                     "artifactLocation": {"uri": source_uri},
                 },
-                "logicalLocations": [
-                    {
-                        "name": loc_name,
-                        "kind": loc_kind,
-                    }
-                ],
+                "logicalLocations": [logical_loc],
             }
         ],
-    })
+        "partialFingerprints": {
+            "primaryLocationLineHash": _fingerprint(rule_id, loc_name, msg_text)
+        },
+    }
+    if rule_id in rule_index_map:
+      entry["ruleIndex"] = rule_index_map[rule_id]
+    props = {k: f[k] for k in _PASSTHROUGH_PROP_KEYS if k in f}
+    if props:
+      entry["properties"] = props
+    results.append(entry)
+
+  if extra_sarif_results:
+    for raw_res in extra_sarif_results:
+      if not isinstance(raw_res, dict):
+        continue
+      cloned = copy.deepcopy(raw_res)
+      rid = str(cloned.get("ruleId", ""))
+      if rid in rule_index_map and "ruleIndex" not in cloned:
+        cloned["ruleIndex"] = rule_index_map[rid]
+      locs = cloned.get("locations")
+      first_loc_name = "mcp"
+      if isinstance(locs, list) and locs and isinstance(locs[0], dict):
+        if "physicalLocation" not in locs[0]:
+          locs[0]["physicalLocation"] = {"artifactLocation": {"uri": source_uri}}
+        llocs = locs[0].get("logicalLocations")
+        if isinstance(llocs, list) and llocs and isinstance(llocs[0], dict):
+          first_loc_name = str(llocs[0].get("name", "mcp"))
+      msg_obj = cloned.get("message")
+      mtext = str(msg_obj.get("text", "")) if isinstance(msg_obj, dict) else ""
+      if "partialFingerprints" not in cloned:
+        cloned["partialFingerprints"] = {
+            "primaryLocationLineHash": _fingerprint(rid, first_loc_name, mtext)
+        }
+      results.append(cloned)
+
+  summary_props: dict[str, Any] = {}
+  for summary_key in (
+      "tool_count",
+      "resource_count",
+      "servers_merged",
+      "tools_input",
+      "tools_output",
+      "tokens_raw",
+      "tokens_slim",
+      "security_findings",
+      "blocking_mutations",
+  ):
+    if summary_key in report:
+      summary_props[summary_key] = report[summary_key]
+
   return {
       "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
       "version": "2.1.0",
       "runs": [
           {
+              "automationDetails": {"id": f"mcp-slim/{source_uri}"},
               "tool": {
                   "driver": {
                       "name": "mcp-slim",
-                      "version": version,
+                      "version": eff_version,
                       "informationUri": "https://github.com/SalyyS1/mcp-slim",
                       "rules": list(AUDIT_SARIF_RULES),
                   }
               },
+              "invocations": [
+                  {
+                      "executionSuccessful": True,
+                      "properties": summary_props,
+                  }
+              ],
               "results": results,
           }
       ],
@@ -3752,7 +3976,7 @@ class LatencyHistogram:
 
 
 # ---------------------------------------------------------------------------
-# MS013 / MS014 -- imported from dedicated module
+# MS013 / MS014 / MS015 / MS016 -- imported from dedicated modules
 # ---------------------------------------------------------------------------
 from ._ms013_ms014 import (  # noqa: E402
     CollisionReport,
@@ -3761,11 +3985,25 @@ from ._ms013_ms014 import (  # noqa: E402
     RefDepthReport,
     ToolNamespaceRouter,
 )
+from ._ms015_ms016 import (  # noqa: E402
+    CompositeMergeResult,
+    CompositeSchemaMerger,
+    JsonRepairResult,
+    ToolCallJsonRepairer,
+    merge_server_manifests,
+    repair_truncated_json,
+)
 
 __all__ = [
     "CollisionReport",
+    "CompositeMergeResult",
+    "CompositeSchemaMerger",
+    "JsonRepairResult",
     "NamespaceRoutingResult",
     "RefDepthGuard",
     "RefDepthReport",
+    "ToolCallJsonRepairer",
     "ToolNamespaceRouter",
+    "merge_server_manifests",
+    "repair_truncated_json",
 ]

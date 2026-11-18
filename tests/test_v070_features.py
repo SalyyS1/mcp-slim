@@ -242,6 +242,8 @@ class TestMcpSlimV070(unittest.TestCase):
             "audit_mcp_elicitation",
             "redact_secrets",
             "sanitize_stream_chunks",
+            "repair_tool_call_json",
+            "merge_mcp_manifests",
             "get_slim_stats",
         },
     )

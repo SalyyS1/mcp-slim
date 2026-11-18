@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v1.7.0](https://img.shields.io/badge/version-v1.7.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.7.0)
+[![Version: v1.8.0](https://img.shields.io/badge/version-v1.8.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.8.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -22,13 +22,13 @@
 
 When connecting MCP clients (**Claude Code**, **Cursor**, **Windsurf**, **Claude Desktop**, **LibreChat**, **Cherry Studio**, or custom agents) to multiple Model Context Protocol (MCP) servers (`git`, `filesystem`, `postgres`, `github`, `atlassian`, `slack`), three structural bottlenecks degrade agent reliability on every conversation turn:
 
-1. **Context Window Bloat & Tool Selection Rot (14,000–60,000+ tokens per turn):** Auto-generated Pydantic and Zod `tools/list` JSON schemas include `$schema` declarations, redundant `title` fields, verbose multi-paragraph descriptions, nullable `anyOf: [{"type": "string"}, {"type": "null"}]` wrappers, and uncompacted `tools/call` JSON responses filled with `null`, `""`, `[]`, and `{}` entries.
+1. **Context Window Bloat & Tool Selection Rot (14,000-60,000+ tokens per turn):** Auto-generated Pydantic and Zod `tools/list` JSON schemas include `$schema` declarations, redundant `title` fields, verbose multi-paragraph descriptions, nullable `anyOf: [{"type": "string"}, {"type": "null"}]` wrappers, and uncompacted `tools/call` JSON responses filled with `null`, `""`, `[]`, and `{}` entries.
 2. **Cross-Provider Schema Rejections (`$defs` / `$ref`):** FastMCP and Pydantic servers emit nested `"$defs"` and `{"$ref": "#/$defs/..."}` pointers inside `inputSchema`, triggering `400 Invalid Argument` errors on Google Gemini, Vertex AI, Azure OpenAI, and local vLLM/Ollama function-calling endpoints.
 3. **Unfiltered Credential Exposure:** MCP tools reading logs, `.env` files, database rows, or git remotes frequently return raw API keys (`sk-ant-...`, `ghp_...`, `AKIA...`, `xoxb-...`, JWTs, or database DSNs containing passwords) directly into the LLM context window.
 
 `mcp-slim` is a transparent, zero-dependency Python 3.10+ stdio proxy that sits between any MCP client and upstream MCP server (`npx`, `uvx`, `python`, `docker`). It operates in two selectable modes:
-- **Standard Mode (`mcp-slim run -- ...`):** Compacts all exposed `tools/list` schemas and `tools/call` payloads in-place by **47–52%**, inlines `$defs`/`$ref` pointers, and filters tools via exact names or wildcard globs (`--allow-tools "get_*,search_*"`).
-- **Lazy Discovery Mode (`mcp-slim run --lazy -- ...`):** Replaces 40–100+ static tool definitions with 2 lightweight on-demand meta-tools (`mcp_search_tools` with BM25 ranking and `mcp_call_tool`), cutting static `tools/list` schema tokens from `12,512` to `168` (**-98.7%**) on any MCP client.
+- **Standard Mode (`mcp-slim run -- ...`):** Compacts all exposed `tools/list` schemas and `tools/call` payloads in-place by **47-52%**, inlines `$defs`/`$ref` pointers, and filters tools via exact names or wildcard globs (`--allow-tools "get_*,search_*"`).
+- **Lazy Discovery Mode (`mcp-slim run --lazy -- ...`):** Replaces 40-100+ static tool definitions with 2 lightweight on-demand meta-tools (`mcp_search_tools` with BM25 ranking and `mcp_call_tool`), cutting static `tools/list` schema tokens from `12,512` to `168` (**-98.7%**) on any MCP client.
 
 ```mermaid
 flowchart LR
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.7.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.8.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -57,14 +57,15 @@ flowchart LR
 | **Recursive `$defs`/`$ref` Inlining, Cycle Breaking & Semantic Hints** | No | No | No | No | **Yes (RFC 6901 pointers, cycle stubs, non-redundant `$ref` role hints)** |
 | **`tools/call`, `resources/read` & `prompts/get` Compaction** | No | No | No | No | **Yes (-43%+ output tokens, UTF-8 base64 `blob` scrubbing)** |
 | **Sliding Token-Window Output Governor (`--token-budget`)** | No | No | No | No | **Yes (Exponential throttling with smooth turn recovery)** |
-| **Streaming Tool-Call & Notification Sanitizer** | No | No | No | No | **Yes (Zero-leak chunk reassembly, padding-overflow defense)** |
+| **Streaming Tool-Call Sanitizer & Truncated JSON Repair** | No | No | No | No | **Yes (`--repair-truncated-json` `MS015` + chunk reassembly)** |
+| **Multi-Server Composite Schema & `$defs` Merger** | No | No | No | No | **Yes (`mcp-slim merge` `MS016` + reverse routing table)** |
 | **Semantic Read-Only TTL Cache (`--cache-ttl`)** | No | No | No | No | **Yes (`readOnlyHint`/`destructiveHint` aware)** |
 | **Pre-Truncation Tool-Poisoning, Shadowing & Secret Shield** | No | No | No | No | **Yes (16 rules + cross-tool shadowing `MS008` + `--vault-handles`)** |
 | **`sampling/createMessage` & `elicitation/create` Firewall** | No | No | No | No | **Yes (`--block-sampling`, `--block-elicitation`, phishing guard `MS007`)** |
 | **Mid-Session Rug-Pull Pinning & Manifest Diff (`--pin-schemas`)** | No | No | No | No | **Yes (SHA-256 baseline pinning + `mcp-slim diff`)** |
 | **Columnar Array-of-Objects Compaction (`--tabular-arrays`)** | No | No | No | No | **Yes (-35% to -55% tokens on SQL/row arrays)** |
 | **Persistent Cost Ledger & OpenTelemetry JSONL Spans (`--otel-jsonl`)** | No | No | No | No | **Yes (`mcp-slim stats` + W3C/OTLP NDJSON spans)** |
-| **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`MS001`-`MS008`, `audit`/`diff --sarif` & Action)** |
+| **OASIS SARIF v2.1.0 Security Audit & CI GitHub Action** | No | No | No | No | **Yes (`MS001`-`MS016`, `audit`/`diff`/`merge --sarif` & Action)** |
 
 ---
 
@@ -311,10 +312,15 @@ result = router.route({
 # result.routed_tools["gitserver"][1]["name"] == "commit"  (no collision)
 ```
 
-### 6. Standalone MCP Server Mode (`mcp-slim serve`)
-In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `diff_mcp_tools`, `audit_mcp_resources`, `audit_mcp_elicitation`, `compact_mcp_output`, `sanitize_stream_chunks`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
+### 6. Streaming Tool-Call JSON Repair & Multi-Server Composite Merger (v1.8.0)
 
-### 7. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
+- **Streaming Tool-Call Structural JSON Repair (`MS015`, `ToolCallJsonRepairer`, `--repair-truncated-json`):** Deterministic O(N) lexical state-machine repairer for streaming LLM tool invocations that terminate mid-token (`max_tokens` cutoffs, SSE stream drops, unescaped Windows path backslashes `C:\dev\users`, raw control characters, trailing commas, dangling object keys, truncated numbers/booleans, and Markdown code fences). Integrated into `ToolCallStreamSanitizer`, `MCPProxy` (`--repair-truncated-json`), `mcp-slim wrap --repair-truncated-json`, and `mcp-slim serve` (`repair_tool_call_json`).
+- **Multi-Server Composite Schema Merger (`MS016`, `CompositeSchemaMerger`, `mcp-slim merge`):** Merges multiple upstream `tools/list` manifests into a unified, collision-free catalog (`prefix_colliding`, `prefix_all`, `merge_identical`, or `first_wins`), deduplicates identical shared `$defs`/`definitions` blocks across servers, rewrites conflicting `#/$defs/...` pointers deterministically, builds an O(1) reverse routing table (`resolve_call(exposed_name) -> (server_id, upstream_name)`), and exports OASIS SARIF v2.1.0 reports (`mcp-slim merge git=git.json fs=fs.json --slim --sarif merge.sarif --fail-on-conflict`).
+
+### 7. Standalone MCP Server Mode (`mcp-slim serve`)
+In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `diff_mcp_tools`, `audit_mcp_resources`, `audit_mcp_elicitation`, `compact_mcp_output`, `sanitize_stream_chunks`, `repair_tool_call_json`, `merge_mcp_manifests`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
+
+### 8. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
 For coding agents (Claude Code, OpenCode, Aider, Cursor) that prefer invoking MCP tools from Bash and piping results through `jq`, `grep`, or `awk` without paying per-turn `tools/list` schema tokens:
 - `--cli-only` returns an empty `tools: []` array to the host IDE (`0` schema tokens in the model prompt) while caching the compacted `inputSchema` definitions in memory.
 - `--bridge-socket /tmp/mcp.sock` multiplexes `mcp-slim bridge` CLI commands directly over the single live stdio MCP server process:
@@ -334,7 +340,7 @@ mcp-slim bridge -s /tmp/mcp-github.sock search_repositories '{"query":"mcp"}' | 
 ## Testing
 
 ```bash
-PYTHONPATH=src python3 -m pytest tests/ -q  # 179 tests cover MS001..MS014 and all proxy components
+PYTHONPATH=src python3 -m pytest tests/ -q  # 194 tests cover MS001..MS016 and all proxy components
 python3 benchmarks/run_benchmarks.py
 ```
 

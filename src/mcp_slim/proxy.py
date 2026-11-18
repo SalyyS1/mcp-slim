@@ -65,6 +65,7 @@ class MCPProxy:
       block_result_injection: bool = False,
       detect_replay: bool = False,
       replay_guard: ToolCallReplayGuard | None = None,
+      repair_truncated_json: bool = False,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -124,8 +125,12 @@ class MCPProxy:
             else TokenWindowGovernor(budget_tokens=token_budget, decay=window_decay)
         )
     )
+    self.repair_truncated_json = repair_truncated_json
     self._server_streams: dict[str, StreamSanitizer] = {}
-    self._client_tool_streams = ToolCallStreamSanitizer(guard=self.secret_guard)
+    self._client_tool_streams = ToolCallStreamSanitizer(
+        guard=self.secret_guard,
+        repair_truncated_json=repair_truncated_json,
+    )
     self.stats_ledger = (
         stats_ledger
         if stats_ledger is not None
@@ -437,6 +442,16 @@ class MCPProxy:
             },
         )
         return ""
+
+      if self.repair_truncated_json and isinstance(arguments, str):
+        from ._ms015_ms016 import ToolCallJsonRepairer  # noqa: PLC0415
+
+        rep = ToolCallJsonRepairer(require_object_root=True).repair(arguments)
+        if rep.is_valid and isinstance(rep.value, dict):
+          arguments = rep.value
+          params["arguments"] = arguments
+          if rep.repaired:
+            self.stats.json_repairs += 1
 
       if isinstance(tool_name, str) and isinstance(arguments, dict):
         arguments = self.schema_slimmer.coerce_arguments(

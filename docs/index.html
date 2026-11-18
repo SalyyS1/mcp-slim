@@ -396,10 +396,10 @@
         <span class="badge">Zero Dependencies (Python 3.10+ / npx / uvx)</span>
         <span class="badge">-48.8% to -98.7% Context Tokens</span>
         <span class="badge">930.6 &micro;s p50 Latency</span>
-        <span class="badge">16 Secret &amp; Injection Rules</span>
+        <span class="badge">16 SARIF Security &amp; Schema Rules</span>
       </div>
-      <h1>mcp-slim <span class="ver">v1.3.0</span></h1>
-      <p class="lead">Transparent Model Context Protocol (MCP) JSON-RPC 2.0 stdio proxy that compacts bloated <code>tools/list</code> schemas &amp; <code>tools/call</code> outputs, inlines <code>$defs/$ref</code> pointers for Google Gemini &amp; Vertex AI, redacts leaked credentials in real time, and tracks cumulative API savings.</p>
+      <h1>mcp-slim <span class="ver">v1.8.0</span></h1>
+      <p class="lead">Transparent Model Context Protocol (MCP) JSON-RPC 2.0 stdio proxy that compacts bloated <code>tools/list</code> schemas &amp; <code>tools/call</code> outputs, repairs truncated streaming tool-call JSON (<code>MS015</code>), merges multi-server catalogs with <code>$defs</code> conflict resolution (<code>MS016</code>), inlines <code>$defs/$ref</code> pointers for Google Gemini &amp; Vertex AI, and redacts leaked credentials in real time.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/SalyyS1/mcp-slim">Star &amp; View on GitHub &rarr;</a>
         <a class="btn" href="#quick-start">Zero-Install CLI (npx / uvx)</a>
@@ -413,6 +413,7 @@
         <button class="tab-btn" id="tab-btn-wrapper" data-tab="panel-wrapper" type="button">2. 1-Click mcp.json / Claude Desktop Config Wrapper</button>
         <button class="tab-btn" id="tab-btn-v120" data-tab="panel-v120" type="button">3. Sliding Window Budget &amp; Stream Sanitizer (v1.2.0)</button>
         <button class="tab-btn" id="tab-btn-v130" data-tab="panel-v130" type="button">4. Elicitation Firewall, Roots &amp; Shadowing Lab (v1.3.0)</button>
+        <button class="tab-btn" id="tab-btn-v180" data-tab="panel-v180" type="button">5. Streaming JSON Repair &amp; Composite Merger (v1.8.0)</button>
       </div>
 
       <!-- TAB 1: LIVE SLIMMER -->
@@ -627,6 +628,36 @@
               <span class="pane-tag" id="v130-verdict-tag">Evaluated</span>
             </div>
             <textarea class="code-area slim-out" id="v130-output" readonly spellcheck="false" aria-label="v1.3.0 security verdict output"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 5: STREAMING JSON REPAIR & COMPOSITE SCHEMA MERGER (v1.8.0) -->
+      <div class="tab-panel" id="panel-v180">
+        <div class="control-section">
+          <div class="control-row">
+            <div class="preset-group">
+              <span class="row-label">v1.8.0 Scenarios:</span>
+              <button class="chip active" type="button" data-v180="repair_trunc">MS015: Truncated max_tokens Tool-Call JSON</button>
+              <button class="chip" type="button" data-v180="repair_win">MS015: Unescaped Windows Paths &amp; Dangling Key</button>
+              <button class="chip" type="button" data-v180="merge_defs">MS016: Multi-Server Collision &amp; $defs Merger</button>
+            </div>
+          </div>
+        </div>
+        <div class="editor-grid">
+          <div class="pane">
+            <div class="pane-header">
+              <span>Truncated Tool-Call JSON or Multi-Server Manifest</span>
+              <span class="pane-tag">MS015 / MS016 Input</span>
+            </div>
+            <textarea class="code-area" id="v180-input" spellcheck="false" aria-label="v1.8.0 JSON repair or merge input"></textarea>
+          </div>
+          <div class="pane">
+            <div class="pane-header">
+              <span>mcp-slim v1.8.0 Repaired Payload / Composite Routing Table</span>
+              <span class="pane-tag" id="v180-verdict-tag">Evaluated</span>
+            </div>
+            <textarea class="code-area slim-out" id="v180-output" readonly spellcheck="false" aria-label="v1.8.0 repair or merge output"></textarea>
           </div>
         </div>
       </div>
@@ -1921,6 +1952,321 @@ mcp-slim stats</code></pre>
     v130Input.addEventListener("input", runV130Lab);
     v130Input.value = JSON.stringify(V130_SCENARIOS.phishing, null, 2);
     runV130Lab();
+
+    // Tab 5: Streaming JSON Repair (MS015) & Composite Schema Merger (MS016) (v1.8.0)
+    const V180_SCENARIOS = {
+      repair_trunc: '{"repo": "SalyyS1/mcp-slim", "filters": [{"tag": "security", "enabled": tru, "note": "cut mid-token at max_tok',
+      repair_win: '```json\n{"workspace": "C:\\dev\\users\\project", "limit": 25., "dangling_key\n```',
+      merge_defs: JSON.stringify({
+        strategy: "prefix_colliding",
+        servers: {
+          git: [
+            {
+              name: "read_file",
+              description: "Read file from git tree at commit.",
+              inputSchema: {
+                $defs: { RefSpec: { type: "object", properties: { rev: { type: "string" } } } },
+                type: "object",
+                properties: { path: { type: "string" }, ref: { $ref: "#/$defs/RefSpec" } }
+              }
+            }
+          ],
+          filesystem: [
+            {
+              name: "read_file",
+              description: "Read file from local disk.",
+              inputSchema: {
+                $defs: { RefSpec: { type: "object", properties: { inode: { type: "integer" } } } },
+                type: "object",
+                properties: { path: { type: "string" }, ref: { $ref: "#/$defs/RefSpec" } }
+              }
+            },
+            {
+              name: "list_dir",
+              description: "List directory entries.",
+              inputSchema: { type: "object", properties: { dir: { type: "string" } } }
+            }
+          ]
+        }
+      }, null, 2)
+    };
+
+    const v180Input = document.getElementById("v180-input");
+    const v180Output = document.getElementById("v180-output");
+    const v180VerdictTag = document.getElementById("v180-verdict-tag");
+
+    function clientRepairJson(raw) {
+      let text = String(raw || "").trim();
+      const repairs = [];
+      if (text.startsWith("```")) {
+        text = text.replace(/^```[a-zA-Z0-9_-]*[ \t]*\r?\n?/, "").replace(/\r?\n?[ \t]*`{1,3}[ \t]*$/, "").trim();
+        repairs.push("stripped_markdown_fence");
+      }
+      try {
+        const direct = JSON.parse(text);
+        return { repaired: repairs.length > 0, is_valid: true, repairs_applied: repairs, value: direct };
+      } catch (_) {}
+
+      const out = [];
+      const stack = [];
+      let inStr = false;
+      let role = "ROOT";
+      let inEsc = false;
+      let escPos = 0;
+      let hexCount = null;
+      let inAtom = false;
+      let atomPos = 0;
+      const validSimple = new Set(['"', "\\", "/", "b", "f", "n", "r", "t"]);
+      const hexSet = new Set("0123456789abcdefABCDEF".split(""));
+
+      function advParent() {
+        if (stack.length) stack[stack.length - 1].state = "EXPECT_COMMA_OR_END";
+      }
+      function fixAtom(tok) {
+        const t = tok.trim();
+        if (t === "true" || t === "false" || t === "null" || /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(t)) return [t, null];
+        for (const kw of ["true", "false", "null"]) {
+          if (kw.startsWith(t) && t.length > 0) return [kw, "completed_keyword_literal"];
+        }
+        const m = t.match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?/);
+        if (m) {
+          const rem = t.slice(m[0].length);
+          if ([".", "e", "E", "e+", "e-", "E+", "E-"].includes(rem)) {
+            return [m[0] === "-0" ? "0" : m[0], "repaired_truncated_number"];
+          }
+        }
+        return [null, null];
+      }
+      function finishMidAtom() {
+        if (!inAtom) return true;
+        const atomText = out.slice(atomPos).join("");
+        inAtom = false;
+        const [fixed, label] = fixAtom(atomText);
+        if (fixed !== null) {
+          out.splice(atomPos, out.length - atomPos, ...fixed.split(""));
+          if (label) repairs.push(label);
+          advParent();
+          return true;
+        }
+        return false;
+      }
+
+      for (const ch of text) {
+        if (inStr) {
+          if (inEsc) {
+            inEsc = false;
+            if (ch === "u") { out.push(ch); hexCount = 0; }
+            else if (validSimple.has(ch)) { out.push(ch); }
+            else { out.push("\\", ch); repairs.push("repaired_invalid_escape"); }
+            continue;
+          }
+          if (hexCount !== null) {
+            if (hexSet.has(ch)) {
+              out.push(ch);
+              hexCount += 1;
+              if (hexCount === 4) hexCount = null;
+              continue;
+            }
+            out.splice(escPos, 0, "\\");
+            hexCount = null;
+            repairs.push("repaired_invalid_escape");
+          }
+          if (ch === "\\") { escPos = out.length; out.push("\\"); inEsc = true; }
+          else if (ch === '"') {
+            out.push('"');
+            inStr = false;
+            if (stack.length) {
+              const top = stack[stack.length - 1];
+              if (role === "KEY" && top.kind === "{") top.state = "EXPECT_COLON";
+              else advParent();
+            }
+          } else if (ch.charCodeAt(0) < 0x20) {
+            out.push(ch === "\n" ? "\\n" : ch === "\r" ? "\\r" : ch === "\t" ? "\\t" : "\\u0000");
+            repairs.push("escaped_control_chars");
+          } else {
+            out.push(ch);
+          }
+          continue;
+        }
+        if (inAtom && [" ", "\t", "\r", "\n", ",", "}", "]", ":"].includes(ch)) {
+          if (!finishMidAtom()) break;
+        }
+        if ([" ", "\t", "\r", "\n"].includes(ch)) continue;
+        if (ch === '"') {
+          if (stack.length) {
+            const top = stack[stack.length - 1];
+            if (top.kind === "{" && top.state === "EXPECT_KEY_OR_END") { role = "KEY"; top.state = "IN_KEY"; }
+            else { role = "VALUE"; top.state = top.kind === "{" ? "IN_VALUE" : "IN_ELEM"; }
+          } else role = "ROOT";
+          inStr = true;
+          out.push('"');
+        } else if (ch === "{" || ch === "[") {
+          if (stack.length) stack[stack.length - 1].state = "IN_SUB";
+          out.push(ch);
+          stack.push({ kind: ch, state: ch === "{" ? "EXPECT_KEY_OR_END" : "EXPECT_ELEM_OR_END", rb: out.length });
+        } else if (ch === ":") {
+          if (stack.length && stack[stack.length - 1].kind === "{" && stack[stack.length - 1].state === "EXPECT_COLON") {
+            out.push(":");
+            stack[stack.length - 1].state = "EXPECT_VALUE";
+          }
+        } else if (ch === ",") {
+          if (stack.length) {
+            const top = stack[stack.length - 1];
+            if (top.state === "EXPECT_COMMA_OR_END") {
+              top.rb = out.length;
+              out.push(",");
+              top.state = top.kind === "{" ? "EXPECT_KEY_OR_END" : "EXPECT_ELEM_OR_END";
+            }
+          }
+        } else if (ch === "}" || ch === "]") {
+          const want = ch === "}" ? "{" : "[";
+          if (stack.length && stack[stack.length - 1].kind === want) {
+            const top = stack.pop();
+            if ((top.state === "EXPECT_KEY_OR_END" || top.state === "EXPECT_ELEM_OR_END") && out.length > top.rb) {
+              out.splice(top.rb);
+              repairs.push("removed_trailing_comma");
+            } else if (["IN_KEY", "EXPECT_COLON", "EXPECT_VALUE"].includes(top.state)) {
+              out.splice(top.rb);
+              repairs.push("dropped_dangling_property");
+            }
+            out.push(ch);
+            advParent();
+          }
+        } else {
+          if (!inAtom) { inAtom = true; atomPos = out.length; }
+          out.push(ch);
+        }
+      }
+
+      if (inStr) {
+        if (stack.length && stack[stack.length - 1].kind === "{" && role === "KEY") {
+          out.splice(stack[stack.length - 1].rb);
+          stack[stack.length - 1].state = "EXPECT_COMMA_OR_END";
+          repairs.push("dropped_dangling_property");
+        } else {
+          if (inEsc || hexCount !== null) { out.splice(escPos); repairs.push("trimmed_dangling_escape"); }
+          out.push('"');
+          repairs.push("closed_string");
+          advParent();
+        }
+      } else if (inAtom) {
+        const [fixed, label] = fixAtom(out.slice(atomPos).join(""));
+        if (fixed !== null) {
+          out.splice(atomPos, out.length - atomPos, ...fixed.split(""));
+          if (label) repairs.push(label);
+          advParent();
+        } else if (stack.length) {
+          out.splice(stack[stack.length - 1].rb);
+          repairs.push("dropped_dangling_property");
+        }
+      }
+      while (stack.length) {
+        const top = stack.pop();
+        if ((top.state === "EXPECT_KEY_OR_END" || top.state === "EXPECT_ELEM_OR_END") && out.length > top.rb) {
+          out.splice(top.rb);
+          repairs.push("removed_trailing_comma");
+        } else if (["IN_KEY", "EXPECT_COLON", "EXPECT_VALUE"].includes(top.state)) {
+          out.splice(top.rb);
+          repairs.push("dropped_dangling_property");
+        }
+        out.push(top.kind === "{" ? "}" : "]");
+        repairs.push(top.kind === "{" ? "closed_object" : "closed_array");
+        advParent();
+      }
+      try {
+        const parsed = JSON.parse(out.join(""));
+        return { repaired: true, is_valid: true, repairs_applied: Array.from(new Set(repairs)), value: parsed };
+      } catch (e) {
+        return { repaired: false, is_valid: false, repairs_applied: Array.from(new Set(repairs)), error: String(e.message || e) };
+      }
+    }
+
+    function runV180Lab() {
+      const raw = v180Input.value;
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.servers && typeof parsed.servers === "object") {
+          const byName = {};
+          const defVariants = {};
+          Object.entries(parsed.servers).forEach(([srv, tools]) => {
+            (tools || []).forEach((t) => {
+              byName[t.name] = byName[t.name] || [];
+              byName[t.name].push({ srv, tool: JSON.parse(JSON.stringify(t)) });
+              const defs = (t.inputSchema && t.inputSchema.$defs) || {};
+              Object.entries(defs).forEach(([dn, ds]) => {
+                const sig = JSON.stringify(ds);
+                defVariants[dn] = defVariants[dn] || {};
+                defVariants[dn][sig] = defVariants[dn][sig] || [];
+                defVariants[dn][sig].push(srv);
+              });
+            });
+          });
+          const conflicts = [];
+          const compositeDefs = {};
+          Object.entries(defVariants).forEach(([dn, sigMap]) => {
+            const sigs = Object.keys(sigMap);
+            if (sigs.length > 1) {
+              const resolved = {};
+              sigs.forEach((s) => {
+                const srv = sigMap[s][0];
+                const newName = srv + "_" + dn;
+                compositeDefs[newName] = JSON.parse(s);
+                resolved[srv] = newName;
+              });
+              conflicts.push({ rule_id: "MS016", kind: "conflicting_shared_def", def_name: dn, resolved_names: resolved });
+            } else {
+              compositeDefs[dn] = JSON.parse(sigs[0]);
+            }
+          });
+          const routing = {};
+          const mergedTools = [];
+          Object.entries(byName).forEach(([tname, group]) => {
+            const collides = group.length > 1;
+            if (collides) {
+              conflicts.push({ rule_id: "MS016", kind: "tool_name_collision", tool: tname, servers: group.map((g) => g.srv) });
+            }
+            group.forEach(({ srv, tool }) => {
+              const exposed = collides ? srv + "__" + tname : tname;
+              tool.name = exposed;
+              mergedTools.push(tool);
+              routing[exposed] = { server_id: srv, upstream_name: tname };
+            });
+          });
+          v180VerdictTag.textContent = conflicts.length ? "MERGED (" + conflicts.length + " MS016 CONFLICTS RESOLVED)" : "MERGED CLEAN";
+          v180Output.value = JSON.stringify({
+            sarif_rule: "MS016 (CompositeSchemaMerger)",
+            conflicts_resolved: conflicts,
+            routing_table: routing,
+            composite_defs: compositeDefs,
+            tools: mergedTools
+          }, null, 2);
+          return;
+        }
+      } catch (_) {}
+
+      const rep = clientRepairJson(raw);
+      v180VerdictTag.textContent = !rep.is_valid ? "UNREPAIRABLE (MS015)" : rep.repaired ? "REPAIRED (MS015)" : "VALID JSON";
+      v180Output.value = JSON.stringify({
+        sarif_rule: rep.repaired || !rep.is_valid ? "MS015 (ToolCallJsonRepairer)" : null,
+        is_valid: rep.is_valid,
+        repaired: rep.repaired,
+        repairs_applied: rep.repairs_applied,
+        repaired_value: rep.value || null,
+        error: rep.error || null
+      }, null, 2);
+    }
+
+    document.querySelectorAll("[data-v180]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("[data-v180]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        v180Input.value = V180_SCENARIOS[btn.dataset.v180];
+        runV180Lab();
+      });
+    });
+    v180Input.addEventListener("input", runV180Lab);
+    v180Input.value = V180_SCENARIOS.repair_trunc;
+    runV180Lab();
   })();
   </script>
 </body>

@@ -306,7 +306,7 @@ class TestAuditSarifRulesV140(unittest.TestCase):
 
     def test_version_updated_to_140(self) -> None:
         import mcp_slim
-        self.assertEqual(mcp_slim.__version__, "1.7.0")
+        self.assertEqual(mcp_slim.__version__, "1.8.0")
 
 
 if __name__ == "__main__":
