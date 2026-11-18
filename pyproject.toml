@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-slim"
-version = "1.5.0"
+version = "1.6.0"
 description = "Zero-config MCP proxy for schema/output token compression, elicitation phishing firewall, roots privacy boundaries, cross-tool shadowing detection, sliding token-window budgets, and real-time secret redaction."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -15,9 +15,11 @@ from .proxy import MCPProxy
 from .server import run_serve
 from .slimmer import (
     LazyToolBroker,
+    LatencyHistogram,
     OutputSlimmer,
     SchemaSlimmer,
     SlimStats,
+    SseChunkThrottle,
     audit_tools_manifest,
     build_audit_sarif,
     diff_tools_manifests,
@@ -223,6 +225,111 @@ def run_benchmark() -> int:
   )
   print("=" * 64)
   print(f"Secrets intercepted & redacted: {guard.report.total_redactions}")
+  return 0
+
+
+def run_bench(
+    turns: int = 10,
+    *,
+    sse_burst_budget: int = 0,
+    json_output: bool = False,
+) -> int:
+  """Multi-turn compression simulation with latency histogram (mcp-slim bench).
+
+  Simulates `turns` back-to-back tool-call + schema-discovery rounds using the
+  built-in benchmark fixtures, records per-method latency samples, optionally
+  exercises SseChunkThrottle with `sse_burst_budget`, and prints a detailed
+  report.  With --json the output is machine-readable JSON.
+  """
+  import time as _time
+
+  slimmer = SchemaSlimmer()
+  out_slimmer = OutputSlimmer()
+  guard = SecretGuard()
+  histogram = LatencyHistogram(
+      method_allowlist=["tools/list", "tools/call"],
+  )
+  throttle = SseChunkThrottle(burst_budget_tokens=sse_burst_budget) if sse_burst_budget > 0 else None
+
+  total_before = 0
+  total_after = 0
+  total_secrets = 0
+  chunks_seen = 0
+  chunks_throttled = 0
+
+  for _ in range(turns):
+    # tools/list (schema slimming)
+    stats_sl = SlimStats()
+    t0 = _time.perf_counter()
+    slimmer.slim_tools_list(SAMPLE_BENCHMARK_TOOLS, stats=stats_sl)
+    t1 = _time.perf_counter()
+    histogram.record("tools/list", (t1 - t0) * 1000.0)
+    total_before += stats_sl.schema_tokens_before
+    total_after += stats_sl.schema_tokens_after
+
+    # tools/call (output slimming + secret redaction)
+    stats_out = SlimStats()
+    t2 = _time.perf_counter()
+    slimmed = out_slimmer.slim_call_result(SAMPLE_BENCHMARK_OUTPUT, stats=stats_out)
+    t3 = _time.perf_counter()
+    histogram.record("tools/call", (t3 - t2) * 1000.0)
+    redacted = guard.redact_value(slimmed)
+    total_before += stats_out.output_tokens_before
+    total_after += stats_out.output_tokens_after
+    total_secrets += guard.report.total_redactions
+
+    # SSE chunk throttle simulation: treat slimmed output as one SSE chunk
+    if throttle is not None:
+      chunk_text = str(redacted)
+      decision = throttle.evaluate(chunk_text)
+      chunks_seen += 1
+      if not decision.allowed:
+        chunks_throttled += 1
+
+  saved = max(0, total_before - total_after)
+  reduction_pct = round(saved / total_before * 100.0, 1) if total_before > 0 else 0.0
+  sl_stats = histogram.stats("tools/list")
+  tc_stats = histogram.stats("tools/call")
+
+  if json_output:
+    import json as _json
+    out = {
+        "turns": turns,
+        "total_tokens_before": total_before,
+        "total_tokens_after": total_after,
+        "tokens_saved": saved,
+        "reduction_pct": reduction_pct,
+        "secrets_redacted": total_secrets,
+        "latency_ms": histogram.all_stats(),
+        "sse_throttle": throttle.snapshot() if throttle is not None else None,
+    }
+    print(_json.dumps(out, indent=2))
+    return 0
+
+  print("mcp-slim Bench Report")
+  print("=" * 76)
+  print(f"Turns simulated : {turns}")
+  print(f"Tokens before   : {total_before:,}")
+  print(f"Tokens after    : {total_after:,}")
+  print(f"Tokens saved    : {saved:,}  (-{reduction_pct}%)")
+  print(f"Secrets redacted: {total_secrets}")
+  print("-" * 76)
+  print(f"{'Method':<16} | {'Count':>6} | {'Mean ms':>8} | {'p50 ms':>7} | {'p90 ms':>7} | {'p99 ms':>7}")
+  print("-" * 76)
+  for method, s in histogram.all_stats().items():
+    print(
+        f"{method:<16} | {s['count']:>6} | {s['mean_ms']:>8.3f} | "
+        f"{s['p50_ms']:>7.3f} | {s['p90_ms']:>7.3f} | {s['p99_ms']:>7.3f}"
+    )
+  if throttle is not None:
+    snap = throttle.snapshot()
+    print("-" * 76)
+    print(
+        f"SSE throttle: burst_budget={snap['burst_budget_tokens']} tokens, "
+        f"chunks={snap['chunks_seen']}, throttled={snap['chunks_throttled']} "
+        f"({round(snap['throttle_rate'] * 100, 1)}%)"
+    )
+  print("=" * 76)
   return 0
 
 
@@ -1047,10 +1154,44 @@ def main(argv: list[str] | None = None) -> int:
   )
   sub.add_parser("benchmark", help="Run built-in token compression & security benchmark")
 
+  bench_p = sub.add_parser(
+      "bench",
+      help="Multi-turn compression simulation with JSON-RPC latency histogram and SSE chunk throttle stats",
+  )
+  bench_p.add_argument(
+      "--turns",
+      type=int,
+      default=10,
+      metavar="N",
+      help="Number of simulated tool-call turns (default: 10)",
+  )
+  bench_p.add_argument(
+      "--sse-burst-budget",
+      type=int,
+      default=0,
+      metavar="TOKENS",
+      dest="sse_burst_budget",
+      help="SSE chunk burst budget tokens; exercises SseChunkThrottle (0 disables)",
+  )
+  bench_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      default=False,
+      help="Output bench results as JSON",
+  )
+
   parsed = parser.parse_args(args_list)
 
   if parsed.benchmark or parsed.subcommand == "benchmark":
     return run_benchmark()
+
+  if parsed.subcommand == "bench":
+    return run_bench(
+        turns=getattr(parsed, "turns", 10),
+        sse_burst_budget=getattr(parsed, "sse_burst_budget", 0),
+        json_output=getattr(parsed, "json_output", False),
+    )
 
   if parsed.subcommand == "serve":
     return run_serve()

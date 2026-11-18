@@ -3396,3 +3396,356 @@ def build_audit_sarif(
           }
       ],
   }
+
+
+# ---------------------------------------------------------------------------
+# v1.6.0 --- SseChunkThrottle
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SseChunkDecision:
+  """Result returned by SseChunkThrottle.evaluate()."""
+
+  allowed: bool
+  """Whether the chunk should be forwarded to the client."""
+
+  chunk_tokens: int
+  """Estimated token count for this chunk."""
+
+  window_tokens: float
+  """Running exponentially-decayed window total after this chunk."""
+
+  budget_tokens: int
+  """Configured per-window burst budget."""
+
+  throttled: bool
+  """True when the chunk was dropped or will be suppressed."""
+
+  drop_reason: str
+  """Human-readable reason when throttled is True, else empty string."""
+
+
+class SseChunkThrottle:
+  """Real-time SSE stream chunk budget throttle (MS011).
+
+  Prevents token burst depletion across SSE transports by tracking a sliding
+  exponentially-decaying window of chunk tokens delivered per session.  When
+  cumulative window pressure exceeds `burst_budget_tokens`, excess chunks are
+  suppressed and an MS011 alert is emitted.
+
+  The window decays by `decay` on each chunk (multiplicative). With the
+  default ``decay=0.95`` and a 60-token chunk every second, the window
+  stabilises around ``chunk_tokens / (1 - decay) = 1200`` tokens, giving a
+  natural steady-state ceiling.
+
+  Args:
+      burst_budget_tokens: Maximum cumulative (decayed) tokens allowed in the
+          rolling window before throttling activates.  0 disables throttling.
+      decay: Per-chunk multiplicative decay factor applied to the window
+          before adding the new chunk (0 < decay < 1).
+      min_passthrough: Minimum number of chunks always forwarded before
+          throttling can engage (default 1 so the first chunk is never
+          dropped).
+  """
+
+  def __init__(
+      self,
+      burst_budget_tokens: int = 0,
+      *,
+      decay: float = 0.95,
+      min_passthrough: int = 1,
+  ) -> None:
+    self.burst_budget_tokens: int = max(0, int(burst_budget_tokens))
+    self.enabled: bool = self.burst_budget_tokens > 0
+    if not (0.0 < decay < 1.0):
+      raise ValueError(f"SseChunkThrottle: decay must be in (0, 1), got {decay!r}")
+    self.decay: float = decay
+    self.min_passthrough: int = max(0, int(min_passthrough))
+    self._window_tokens: float = 0.0
+    self._chunks_seen: int = 0
+    self._chunks_throttled: int = 0
+
+  # ------------------------------------------------------------------
+  # Public API
+  # ------------------------------------------------------------------
+
+  def evaluate(self, chunk_text: str, *, stats: "SlimStats | None" = None) -> SseChunkDecision:
+    """Process one SSE chunk and return a throttle decision.
+
+    The window is decayed *before* adding the new chunk so that an idle
+    session recovers its full budget immediately.
+
+    Args:
+        chunk_text: Raw SSE chunk text (the ``data:`` payload).
+        stats: Optional :class:`SlimStats` accumulator; ``budget_throttles``
+            is incremented when this chunk is suppressed.
+
+    Returns:
+        :class:`SseChunkDecision` with ``allowed=True`` when the chunk
+        should be forwarded, ``allowed=False`` when it is suppressed.
+    """
+    chunk_tokens = estimate_tokens(chunk_text)
+    self._window_tokens = self._window_tokens * self.decay + chunk_tokens
+    self._chunks_seen += 1
+
+    if not self.enabled or self._chunks_seen <= self.min_passthrough:
+      return SseChunkDecision(
+          allowed=True,
+          chunk_tokens=chunk_tokens,
+          window_tokens=self._window_tokens,
+          budget_tokens=self.burst_budget_tokens,
+          throttled=False,
+          drop_reason="",
+      )
+
+    over_budget = self._window_tokens > self.burst_budget_tokens
+    if over_budget:
+      self._chunks_throttled += 1
+      if stats is not None:
+        stats.budget_throttles += 1
+      excess = round(self._window_tokens - self.burst_budget_tokens, 1)
+      return SseChunkDecision(
+          allowed=False,
+          chunk_tokens=chunk_tokens,
+          window_tokens=self._window_tokens,
+          budget_tokens=self.burst_budget_tokens,
+          throttled=True,
+          drop_reason=(
+              f"MS011: SSE chunk suppressed; window_tokens={self._window_tokens:.1f} "
+              f"exceeds burst_budget_tokens={self.burst_budget_tokens} "
+              f"(excess {excess} tokens, decay={self.decay})"
+          ),
+      )
+
+    return SseChunkDecision(
+        allowed=True,
+        chunk_tokens=chunk_tokens,
+        window_tokens=self._window_tokens,
+        budget_tokens=self.burst_budget_tokens,
+        throttled=False,
+        drop_reason="",
+    )
+
+  def reset(self) -> None:
+    """Reset the window; call between SSE sessions."""
+    self._window_tokens = 0.0
+    self._chunks_seen = 0
+    self._chunks_throttled = 0
+
+  def snapshot(self) -> dict[str, Any]:
+    """Return a JSON-serialisable snapshot of the current throttle state."""
+    return {
+        "enabled": self.enabled,
+        "burst_budget_tokens": self.burst_budget_tokens,
+        "decay": self.decay,
+        "window_tokens": round(self._window_tokens, 3),
+        "chunks_seen": self._chunks_seen,
+        "chunks_throttled": self._chunks_throttled,
+        "throttle_rate": (
+            round(self._chunks_throttled / self._chunks_seen, 4)
+            if self._chunks_seen > 0
+            else 0.0
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# v1.6.0 --- LatencyHistogram
+# ---------------------------------------------------------------------------
+
+class LatencyHistogram:
+  """JSON-RPC call latency histogram with Prometheus text-format export (MS012).
+
+  Records per-method round-trip latency samples (in milliseconds), computes
+  percentile statistics (p50/p90/p95/p99), and can render a Prometheus
+  ``# TYPE``/``# HELP`` text-format metrics page consumable by any scraper.
+
+  Buckets follow the standard Prometheus histogram convention: each bucket
+  counts observations ``<= upper_bound``.  The default bucket boundaries
+  cover sub-millisecond to 60-second RPC spans.
+
+  Args:
+      method_allowlist: When non-empty, only methods in this set are tracked.
+          Pass ``None`` or an empty set to track all methods.
+      buckets: Explicit upper-bound values in milliseconds (must be sorted
+          ascending).  Defaults to a sensible set for JSON-RPC over stdio.
+  """
+
+  _DEFAULT_BUCKETS: tuple[float, ...] = (
+      1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0,
+      1_000.0, 2_500.0, 5_000.0, 10_000.0, 30_000.0, 60_000.0,
+  )
+
+  def __init__(
+      self,
+      method_allowlist: set[str] | list[str] | None = None,
+      *,
+      buckets: tuple[float, ...] | list[float] | None = None,
+  ) -> None:
+    self._allowlist: frozenset[str] | None = (
+        frozenset(method_allowlist) if method_allowlist else None
+    )
+    raw_buckets = list(buckets) if buckets is not None else list(self._DEFAULT_BUCKETS)
+    if sorted(raw_buckets) != raw_buckets:
+      raise ValueError("LatencyHistogram: buckets must be sorted ascending")
+    self._buckets: tuple[float, ...] = tuple(raw_buckets)
+    # method -> list of latency samples (ms)
+    self._samples: dict[str, list[float]] = {}
+    # method -> bucket_counts (len == len(buckets))
+    self._bucket_counts: dict[str, list[int]] = {}
+    self._total_count: dict[str, int] = {}
+    self._total_sum_ms: dict[str, float] = {}
+
+  # ------------------------------------------------------------------
+  # Recording
+  # ------------------------------------------------------------------
+
+  def record(self, method: str, latency_ms: float) -> None:
+    """Record one latency observation for a JSON-RPC method.
+
+    Args:
+        method: JSON-RPC method name, e.g. ``"tools/call"``.
+        latency_ms: Round-trip latency in milliseconds (must be >= 0).
+    """
+    if latency_ms < 0:
+      latency_ms = 0.0
+    if self._allowlist is not None and method not in self._allowlist:
+      return
+    if method not in self._samples:
+      self._samples[method] = []
+      self._bucket_counts[method] = [0] * len(self._buckets)
+      self._total_count[method] = 0
+      self._total_sum_ms[method] = 0.0
+    self._samples[method].append(latency_ms)
+    self._total_count[method] += 1
+    self._total_sum_ms[method] += latency_ms
+    for idx, upper in enumerate(self._buckets):
+      if latency_ms <= upper:
+        self._bucket_counts[method][idx] += 1
+
+  # ------------------------------------------------------------------
+  # Statistics
+  # ------------------------------------------------------------------
+
+  def _percentile(self, samples: list[float], pct: float) -> float:
+    """Return the p-th percentile from a sorted or unsorted sample list."""
+    if not samples:
+      return 0.0
+    s = sorted(samples)
+    n = len(s)
+    if n == 1:
+      return s[0]
+    # Nearest-rank method (inclusive).
+    rank = max(1, int(math.ceil(pct / 100.0 * n)))
+    return s[rank - 1]
+
+  def stats(self, method: str) -> dict[str, Any]:
+    """Return summary statistics for one method.
+
+    Returns:
+        Dict with keys: ``count``, ``sum_ms``, ``mean_ms``, ``min_ms``,
+        ``max_ms``, ``p50_ms``, ``p90_ms``, ``p95_ms``, ``p99_ms``.
+        All values are ``0`` when no samples have been recorded.
+    """
+    samples = self._samples.get(method, [])
+    if not samples:
+      return {
+          "count": 0,
+          "sum_ms": 0.0,
+          "mean_ms": 0.0,
+          "min_ms": 0.0,
+          "max_ms": 0.0,
+          "p50_ms": 0.0,
+          "p90_ms": 0.0,
+          "p95_ms": 0.0,
+          "p99_ms": 0.0,
+      }
+    total = self._total_count[method]
+    total_sum = self._total_sum_ms[method]
+    return {
+        "count": total,
+        "sum_ms": round(total_sum, 3),
+        "mean_ms": round(total_sum / total, 3),
+        "min_ms": round(min(samples), 3),
+        "max_ms": round(max(samples), 3),
+        "p50_ms": round(self._percentile(samples, 50.0), 3),
+        "p90_ms": round(self._percentile(samples, 90.0), 3),
+        "p95_ms": round(self._percentile(samples, 95.0), 3),
+        "p99_ms": round(self._percentile(samples, 99.0), 3),
+    }
+
+  def all_stats(self) -> dict[str, dict[str, Any]]:
+    """Return statistics for every tracked method."""
+    return {method: self.stats(method) for method in sorted(self._samples)}
+
+  def methods(self) -> list[str]:
+    """Return sorted list of methods for which samples have been recorded."""
+    return sorted(self._samples.keys())
+
+  def total_observations(self) -> int:
+    """Return total number of observations across all methods."""
+    return sum(self._total_count.values())
+
+  # ------------------------------------------------------------------
+  # Prometheus text-format export
+  # ------------------------------------------------------------------
+
+  def prometheus_text(self, *, prefix: str = "mcp_slim_jsonrpc") -> str:
+    """Render a Prometheus text-format metrics page.
+
+    Produces standard ``_bucket``, ``_count``, and ``_sum`` series for each
+    method plus ``_percentile`` gauges (p50/p90/p95/p99).
+
+    Args:
+        prefix: Metric name prefix (default ``mcp_slim_jsonrpc``).
+
+    Returns:
+        A string in Prometheus exposition format v0.0.4, ending with ``\\n``.
+    """
+    lines: list[str] = []
+    hist_name = f"{prefix}_latency_ms"
+    pct_name = f"{prefix}_latency_percentile_ms"
+
+    lines.append(f"# HELP {hist_name} JSON-RPC method round-trip latency in milliseconds.")
+    lines.append(f"# TYPE {hist_name} histogram")
+    for method in sorted(self._samples):
+      safe_method = method.replace("/", "_").replace(".", "_").replace("-", "_")
+      label = f'method="{method}"'
+      samples = self._samples[method]
+      counts = self._bucket_counts[method]
+      # counts[idx] is already cumulative (incremented for every bucket
+      # whose upper_bound >= the observed latency), matching Prometheus convention.
+      for idx, upper in enumerate(self._buckets):
+        lines.append(
+            f'{hist_name}_bucket{{le="{upper}",{label}}} {counts[idx]}'
+        )
+      lines.append(f'{hist_name}_bucket{{le="+Inf",{label}}} {self._total_count[method]}')
+      lines.append(f'{hist_name}_count{{{label}}} {self._total_count[method]}')
+      lines.append(f'{hist_name}_sum{{{label}}} {self._total_sum_ms[method]:.3f}')
+
+    lines.append(f"# HELP {pct_name} JSON-RPC latency percentiles (gauge, milliseconds).")
+    lines.append(f"# TYPE {pct_name} gauge")
+    for method in sorted(self._samples):
+      s = self.stats(method)
+      label = f'method="{method}"'
+      for pct_label, key in (("0.5", "p50_ms"), ("0.9", "p90_ms"), ("0.95", "p95_ms"), ("0.99", "p99_ms")):
+        lines.append(
+            f'{pct_name}{{quantile="{pct_label}",{label}}} {s[key]}'
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+  def reset(self) -> None:
+    """Clear all recorded samples."""
+    self._samples.clear()
+    self._bucket_counts.clear()
+    self._total_count.clear()
+    self._total_sum_ms.clear()
+
+  def snapshot(self) -> dict[str, Any]:
+    """Return a JSON-serialisable snapshot of all histogram data."""
+    return {
+        "buckets_ms": list(self._buckets),
+        "methods": self.all_stats(),
+        "total_observations": self.total_observations(),
+    }
