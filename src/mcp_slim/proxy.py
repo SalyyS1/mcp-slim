@@ -19,7 +19,10 @@ from .slimmer import (
     ResourceUriGuard,
     RootsPrivacyGuard,
     SchemaSlimmer,
+    SessionPolicy,
+    SessionPolicyEngine,
     SlimStats,
+    TemplateArgumentShield,
     ToolCallReplayGuard,
     ToolCatalogPruner,
     TokenWindowGovernor,
@@ -74,6 +77,14 @@ class MCPProxy:
       strict_rpc_ids: bool = False,
       max_batch_size: int = 32,
       rpc_firewall: JsonRpcResponseFirewall | None = None,
+      enforce_session_policy: bool = False,
+      session_policy: SessionPolicy | dict[str, Any] | None = None,
+      session_policy_engine: SessionPolicyEngine | None = None,
+      shield_templates: bool = False,
+      max_template_depth: int = 1,
+      sanitize_templates_in_place: bool = False,
+      template_shield: TemplateArgumentShield | None = None,
+      server_id: str = "",
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -170,6 +181,25 @@ class MCPProxy:
         else JsonRpcResponseFirewall(
             enabled=strict_rpc_ids,
             max_batch_size=max(1, int(max_batch_size)),
+        )
+    )
+    self.server_id = server_id
+    self.session_policy_engine = (
+        session_policy_engine
+        if session_policy_engine is not None
+        else SessionPolicyEngine(
+            policy=session_policy,
+            enabled=bool(enforce_session_policy or session_policy is not None),
+        )
+    )
+    self.sanitize_templates_in_place = sanitize_templates_in_place
+    self.template_shield = (
+        template_shield
+        if template_shield is not None
+        else TemplateArgumentShield(
+            enabled=bool(shield_templates),
+            max_depth=max(0, int(max_template_depth)),
+            block_exfiltration=not sanitize_templates_in_place,
         )
     )
     self._pending_methods: dict[str | int, str] = {}
@@ -360,6 +390,136 @@ class MCPProxy:
         )
       return raw_line
 
+    if (
+        self.session_policy_engine.enabled
+        and isinstance(method, str)
+        and not (
+            method == "tools/call"
+            and isinstance(params, dict)
+            and self.lazy_broker is not None
+            and params.get("name") in (LazyToolBroker.SEARCH_TOOL_NAME, LazyToolBroker.CALL_TOOL_NAME)
+        )
+    ):
+      pol_dec = self.session_policy_engine.evaluate_client_request(
+          msg, server_id=self.server_id
+      )
+      if not pol_dec.allowed:
+        self.stats.blocked_calls += 1
+        self.stats.policy_violations_blocked += 1
+        pol_msg = f"[mcp-slim] Security Alert MS019: {pol_dec.violations[0].message}"
+        if not self.quiet:
+          sys.stderr.write(f"{pol_msg}\n")
+        if msg_id is not None:
+          if method == "tools/call":
+            pol_reply: dict[str, Any] = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "result": {
+                    "content": [{"type": "text", "text": pol_msg}],
+                    "isError": True,
+                },
+            }
+          else:
+            pol_reply = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "error": {"code": -32600, "message": pol_msg},
+            }
+          self._local_responses.append(
+              json.dumps(pol_reply, ensure_ascii=False, separators=(",", ":")) + "\n"
+          )
+        elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+        self._emit_span(
+            name=f"mcp.{method}",
+            kind="CLIENT",
+            start_ns=start_wall_ns,
+            end_ns=start_wall_ns + elapsed_ns,
+            is_error=True,
+            error_message=pol_msg,
+            attributes={
+                "mcp.method.name": method,
+                "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": True,
+                "mcp_slim.policy_violation_blocked": True,
+                "mcp_slim.violation_code": pol_dec.violations[0].violation_code,
+            },
+        )
+        return ""
+
+    if self.template_shield.enabled and isinstance(method, str) and isinstance(params, dict):
+      tpl_dec = None
+      if method == "prompts/get" and isinstance(params.get("arguments"), dict):
+        tpl_dec = self.template_shield.audit_prompt_arguments(
+            str(params.get("name") or ""),
+            params["arguments"],
+            block_exfiltration=not self.sanitize_templates_in_place,
+        )
+      elif method in ("resources/read", "resources/subscribe"):
+        res_args: dict[str, Any] = {}
+        if isinstance(params.get("uri"), str):
+          res_args["uri"] = params["uri"]
+        if isinstance(params.get("arguments"), dict):
+          res_args.update(params["arguments"])
+        if res_args:
+          tpl_dec = self.template_shield.audit_arguments(
+              res_args,
+              template_type="resource",
+              uri_template=str(params.get("uriTemplate") or ""),
+              block_exfiltration=not self.sanitize_templates_in_place,
+          )
+      elif method == "completion/complete" and isinstance(params.get("argument"), dict):
+        arg_obj = params["argument"]
+        arg_k = str(arg_obj.get("name") or "value")
+        tpl_dec = self.template_shield.audit_arguments(
+            {arg_k: arg_obj.get("value", "")},
+            template_type="completion",
+            block_exfiltration=not self.sanitize_templates_in_place,
+        )
+
+      if tpl_dec is not None and tpl_dec.violations:
+        if not tpl_dec.allowed:
+          self.stats.blocked_calls += 1
+          self.stats.template_exfiltrations_blocked += 1
+          tpl_msg = f"[mcp-slim] Security Alert MS020: {tpl_dec.violations[0].message}"
+          if not self.quiet:
+            sys.stderr.write(f"{tpl_msg}\n")
+          if msg_id is not None:
+            tpl_err = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "error": {"code": -32602, "message": tpl_msg},
+            }
+            self._local_responses.append(
+                json.dumps(tpl_err, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.{method}",
+              kind="CLIENT",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=tpl_msg,
+              attributes={
+                  "mcp.method.name": method,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.template_exfiltration_blocked": True,
+                  "mcp_slim.violation_code": tpl_dec.violations[0].violation_code,
+              },
+          )
+          return ""
+        self.stats.template_exfiltrations_blocked += len(tpl_dec.violations)
+        if method == "prompts/get" and isinstance(params.get("arguments"), dict):
+          params["arguments"] = tpl_dec.sanitized_arguments
+        elif method in ("resources/read", "resources/subscribe") and "uri" in tpl_dec.sanitized_arguments:
+          params["uri"] = tpl_dec.sanitized_arguments["uri"]
+        elif method == "completion/complete" and isinstance(params.get("argument"), dict):
+          arg_k = str(params["argument"].get("name") or "value")
+          params["argument"]["value"] = tpl_dec.sanitized_arguments.get(arg_k, "")
+
     resolved_tool_name: str | None = None
     if method == "tools/call" and isinstance(params, dict):
       tool_name = params.get("name")
@@ -412,6 +572,29 @@ class MCPProxy:
           )
           tool_name = params["name"]
           arguments = params["arguments"]
+          if self.session_policy_engine.enabled:
+            lazy_pol = self.session_policy_engine.evaluate_client_request(
+                msg, server_id=self.server_id
+            )
+            if not lazy_pol.allowed:
+              self.stats.blocked_calls += 1
+              self.stats.policy_violations_blocked += 1
+              pol_msg = f"[mcp-slim] Security Alert MS019: {lazy_pol.violations[0].message}"
+              if not self.quiet:
+                sys.stderr.write(f"{pol_msg}\n")
+              if msg_id is not None:
+                pol_reply = {
+                    "jsonrpc": msg.get("jsonrpc", "2.0"),
+                    "id": msg_id,
+                    "result": {
+                        "content": [{"type": "text", "text": pol_msg}],
+                        "isError": True,
+                    },
+                }
+                self._local_responses.append(
+                    json.dumps(pol_reply, ensure_ascii=False, separators=(",", ":")) + "\n"
+                )
+              return ""
 
       if isinstance(tool_name, str):
         resolved_tool_name = tool_name
@@ -867,6 +1050,43 @@ class MCPProxy:
       srv_params = msg.get("params")
       start_wall_ns = time.time_ns()
       start_mono_ns = time.perf_counter_ns()
+      if self.session_policy_engine.enabled:
+        srv_pol = self.session_policy_engine.evaluate_server_response(
+            msg, server_id=self.server_id
+        )
+        if not srv_pol.allowed:
+          self.stats.blocked_calls += 1
+          self.stats.policy_violations_blocked += 1
+          srv_err = f"[mcp-slim] Security Alert MS019: {srv_pol.violations[0].message}"
+          if not self.quiet:
+            sys.stderr.write(f"{srv_err}\n")
+          if msg_id is not None:
+            err_payload = {
+                "jsonrpc": msg.get("jsonrpc", "2.0"),
+                "id": msg_id,
+                "error": {"code": -32600, "message": srv_err},
+            }
+            self._local_server_responses.append(
+                json.dumps(err_payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+          elapsed_ns = max(0, time.perf_counter_ns() - start_mono_ns)
+          self._emit_span(
+              name=f"mcp.{srv_method}",
+              kind="SERVER",
+              start_ns=start_wall_ns,
+              end_ns=start_wall_ns + elapsed_ns,
+              is_error=True,
+              error_message=srv_err,
+              attributes={
+                  "mcp.method.name": srv_method,
+                  "mcp.request.id": str(msg_id) if msg_id is not None else None,
+                  "mcp_slim.cache_hit": False,
+                  "mcp_slim.blocked": True,
+                  "mcp_slim.policy_violation_blocked": True,
+                  "mcp_slim.violation_code": srv_pol.violations[0].violation_code,
+              },
+          )
+          return ""
       if srv_method == "sampling/createMessage":
         if self.block_sampling:
           self.stats.blocked_calls += 1
@@ -1192,6 +1412,10 @@ class MCPProxy:
             for pm in pin_mutations:
               sys.stderr.write(f"[mcp-slim] Security Pin Alert: {pm.message}\n")
           tools = self.secret_guard.redact_value(verified_tools)
+          if self.session_policy_engine.enabled:
+            tools = self.session_policy_engine.filter_tools_for_server(
+                self.server_id, tools
+            )
           sanitized_tok = estimate_tokens(tools)
           if (
               self.tool_pruner is not None

@@ -1,6 +1,6 @@
 """mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "1.9.0"
+__version__ = "2.0.0"
 
 from .guard import (
     RedactionReport,
@@ -13,6 +13,7 @@ from .server import handle_server_rpc, run_serve
 from .slimmer import (
     AUDIT_SARIF_RULES,
     BranchContract,
+    CapabilityScope,
     CollisionReport,
     CompositeMergeResult,
     CompositeSchemaMerger,
@@ -23,6 +24,8 @@ from .slimmer import (
     LatencyHistogram,
     NamespaceRoutingResult,
     OutputSlimmer,
+    PolicyDecision,
+    PolicyViolation,
     RefDepthGuard,
     RefDepthReport,
     ResourceUriGuard,
@@ -30,9 +33,14 @@ from .slimmer import (
     RpcFirewallDecision,
     RpcFirewallViolation,
     SchemaSlimmer,
+    SessionPolicy,
+    SessionPolicyEngine,
     SlimStats,
     SseChunkDecision,
     SseChunkThrottle,
+    TemplateArgumentDecision,
+    TemplateArgumentShield,
+    TemplateShieldViolation,
     ToolCallJsonRepairer,
     ToolCallReplayGuard,
     ToolCatalogPruner,
@@ -46,6 +54,7 @@ from .slimmer import (
     audit_elicitation_request,
     audit_resources_manifest,
     audit_rpc_transcript,
+    audit_session_policy,
     audit_tools_manifest,
     build_audit_sarif,
     canonicalize_resource_uri,
@@ -58,6 +67,7 @@ from .slimmer import (
     merge_server_manifests,
     repair_truncated_json,
     scan_tool_result_for_injection,
+    shield_template_arguments,
     tokenize_mcp_text,
 )
 from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label

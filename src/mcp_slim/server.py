@@ -13,6 +13,7 @@ from .slimmer import (
     CompositeSchemaMerger,
     OutputSlimmer,
     SchemaSlimmer,
+    SessionPolicyEngine,
     SlimStats,
     TokenWindowGovernor,
     ToolCallJsonRepairer,
@@ -20,8 +21,10 @@ from .slimmer import (
     audit_elicitation_request,
     audit_resources_manifest,
     audit_rpc_transcript,
+    audit_session_policy,
     audit_tools_manifest,
     diff_tools_manifests,
+    shield_template_arguments,
 )
 from .telemetry import StatsLedger
 
@@ -331,6 +334,73 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["events"],
+        },
+    },
+    {
+        "name": "evaluate_session_policy",
+        "description": (
+            "Evaluate an MCP JSON-RPC frame or multi-upstream session transcript against "
+            "a capability-scoped SessionPolicy to detect privilege escalation and cross-server traversal (MS019)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "policy": {
+                    "type": "object",
+                    "description": "SessionPolicy configuration object defining server_scopes, read_only, and delegation rules.",
+                },
+                "frame": {
+                    "type": "object",
+                    "description": "Optional single MCP JSON-RPC frame to evaluate.",
+                },
+                "events": {
+                    "type": "array",
+                    "description": "Optional ordered array of {direction, server_id, target_server_id, frame} transcript events.",
+                    "items": {"type": "object"},
+                },
+                "server_id": {
+                    "type": "string",
+                    "description": "Origin upstream server identifier.",
+                },
+                "target_server_id": {
+                    "type": "string",
+                    "description": "Target upstream server identifier when evaluating cross-server routing.",
+                },
+            },
+            "required": ["policy"],
+        },
+    },
+    {
+        "name": "shield_mcp_template_args",
+        "description": (
+            "Audit and sanitize MCP prompt or RFC 6570 resource template arguments against "
+            "recursive delimiter expansion, cross-argument cycles, URI breakout, traversal, and secret exfiltration (MS020)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "arguments": {
+                    "type": "object",
+                    "description": "Key-value map of prompt or resource template arguments.",
+                },
+                "template_type": {
+                    "type": "string",
+                    "description": "Template context: 'prompt', 'resource', or 'completion' (default 'prompt').",
+                },
+                "uri_template": {
+                    "type": "string",
+                    "description": "Optional RFC 6570 URI template or prompt identifier.",
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "description": "Maximum allowed template nesting depth (default 1).",
+                },
+                "block_exfiltration": {
+                    "type": "boolean",
+                    "description": "Mark decision disallowed when exfiltration or injection violations are present (default true).",
+                },
+            },
+            "required": ["arguments"],
         },
     },
     {
@@ -729,6 +799,77 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
           "jsonrpc": "2.0",
           "id": msg_id,
           "result": _text_result(rep_rpc),
+      }
+
+    if name == "evaluate_session_policy":
+      pol_in = args.get("policy")
+      if not isinstance(pol_in, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'policy' must be a JSON object.", is_error=True),
+        }
+      events_in = args.get("events")
+      frame_in = args.get("frame")
+      if isinstance(events_in, list):
+        engine = SessionPolicyEngine(policy=pol_in, enabled=True)
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(engine.audit_session_transcript(events_in)),
+        }
+      if not isinstance(frame_in, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(
+                "Either 'frame' (object) or 'events' (array) must be provided.",
+                is_error=True,
+            ),
+        }
+      pol_dec = audit_session_policy(
+          frame_in,
+          pol_in,
+          server_id=str(args.get("server_id") or ""),
+          target_server_id=(
+              str(args["target_server_id"])
+              if isinstance(args.get("target_server_id"), str) and args.get("target_server_id")
+              else None
+          ),
+      )
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(pol_dec.to_dict()),
+      }
+
+    if name == "shield_mcp_template_args":
+      tpl_args = args.get("arguments")
+      if not isinstance(tpl_args, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'arguments' must be a JSON object.", is_error=True),
+        }
+      tpl_type = str(args.get("template_type") or "prompt")
+      uri_tpl = str(args.get("uri_template") or "")
+      max_d = int(args.get("max_depth", 1) if args.get("max_depth") is not None else 1)
+      blk = bool(
+          args.get("block_exfiltration", True)
+          if args.get("block_exfiltration") is not None
+          else True
+      )
+      tpl_dec = shield_template_arguments(
+          template_type=tpl_type,
+          arguments=tpl_args,
+          uri_template=uri_tpl,
+          max_depth=max_d,
+          block_exfiltration=blk,
+      )
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(tpl_dec.to_dict()),
       }
 
     if name == "get_slim_stats":

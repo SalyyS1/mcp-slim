@@ -237,7 +237,7 @@ class TestToolCatalogPrunerMS017(unittest.TestCase):
             self.assertEqual(rep["tools_output"], 2)  # k8s + pinned health_ping
             sarif = json.loads(sarif_path.read_text(encoding="utf-8"))
             self.assertEqual(sarif["version"], "2.1.0")
-            self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], "1.9.0")
+            self.assertEqual(sarif["runs"][0]["tool"]["driver"]["version"], "2.0.0")
             rule_ids = [r["id"] for r in sarif["runs"][0]["tool"]["driver"]["rules"]]
             self.assertIn("MS017", rule_ids)
             self.assertIn("MS018", rule_ids)
@@ -423,8 +423,8 @@ class TestProxyServeAndWrapV190(unittest.TestCase):
         self.assertGreaterEqual(proxy.secret_guard.report.total_redactions, 1)
 
     def test_mcp_serve_v190_tools_and_wrap_config(self) -> None:
-        self.assertEqual(mcp_slim.__version__, "1.9.0")
-        self.assertEqual(len(AUDIT_SARIF_RULES), 18)
+        self.assertEqual(mcp_slim.__version__, "2.0.0")
+        self.assertEqual(len(AUDIT_SARIF_RULES), 20)
 
         # tools/list exposes filter_tools_for_intent and audit_rpc_transcript
         list_resp = handle_server_rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-slim"
-version = "1.9.0"
-description = "Zero-config MCP proxy for schema/output token compression, BM25+ intent-aware tool catalog pruning, JSON-RPC response correlation firewall, elicitation phishing firewall, roots privacy boundaries, cross-tool shadowing detection, sliding token-window budgets, real-time secret redaction, streaming JSON repair, and composite schema merger."
+version = "2.0.0"
+description = "Zero-config MCP proxy for schema/output token compression, capability-scoped multi-upstream session policy enforcement, recursive template exfiltration shielding, BM25+ intent catalog pruning, JSON-RPC response correlation firewall, elicitation phishing firewall, roots privacy boundaries, sliding token-window budgets, and real-time secret redaction."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

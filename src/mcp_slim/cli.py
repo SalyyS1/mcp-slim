@@ -19,13 +19,18 @@ from .slimmer import (
     LatencyHistogram,
     OutputSlimmer,
     SchemaSlimmer,
+    SessionPolicy,
+    SessionPolicyEngine,
     SlimStats,
     SseChunkThrottle,
+    TemplateArgumentShield,
     ToolCatalogPruner,
+    audit_session_policy,
     audit_tools_manifest,
     build_audit_sarif,
     diff_tools_manifests,
     estimate_tokens,
+    shield_template_arguments,
 )
 from .telemetry import StatsLedger
 
@@ -292,6 +297,59 @@ def run_bench(
   reduction_pct = round(saved / total_before * 100.0, 1) if total_before > 0 else 0.0
   sl_stats = histogram.stats("tools/list")
   tc_stats = histogram.stats("tools/call")
+  del sl_stats, tc_stats
+
+  pol_engine = SessionPolicyEngine(
+      policy={
+          "session_id": "bench",
+          "allow_cross_server_delegation": False,
+          "server_scopes": {
+              "git": {"read_only": True, "sampling_enabled": False},
+              "prod_db": {"allowed_tools": ["select_*"], "read_only": True},
+          },
+      },
+      enabled=True,
+  )
+  tpl_shield = TemplateArgumentShield(enabled=True, max_depth=1, block_exfiltration=True)
+  sec_hist = LatencyHistogram(method_allowlist=["session_policy", "template_shield"])
+  pol_blocked = 0
+  tpl_blocked = 0
+  sample_pol_req = {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/call",
+      "params": {"name": "prod_db__drop_users", "arguments": {}},
+  }
+  sample_tpl_args = {
+      "query": "{{ outer {{ env.AWS_SECRET_ACCESS_KEY }} }}",
+      "path": "../../etc/passwd",
+  }
+  for _ in range(turns):
+    tp0 = _time.perf_counter()
+    p_dec = pol_engine.evaluate_client_request(sample_pol_req, server_id="git")
+    tp1 = _time.perf_counter()
+    sec_hist.record("session_policy", (tp1 - tp0) * 1000.0)
+    if not p_dec.allowed:
+      pol_blocked += 1
+
+    ts0 = _time.perf_counter()
+    t_dec = tpl_shield.audit_arguments(
+        sample_tpl_args,
+        template_type="resource",
+        uri_template="file:///workspace/{path}",
+    )
+    ts1 = _time.perf_counter()
+    sec_hist.record("template_shield", (ts1 - ts0) * 1000.0)
+    if not t_dec.allowed:
+      tpl_blocked += 1
+
+  security_bench = {
+      "policy_evaluations": turns,
+      "policy_escalations_blocked": pol_blocked,
+      "template_evaluations": turns,
+      "template_exfiltrations_blocked": tpl_blocked,
+      "latency_ms": sec_hist.all_stats(),
+  }
 
   if json_output:
     import json as _json
@@ -304,6 +362,7 @@ def run_bench(
         "secrets_redacted": total_secrets,
         "latency_ms": histogram.all_stats(),
         "sse_throttle": throttle.snapshot() if throttle is not None else None,
+        "security_bench": security_bench,
     }
     print(_json.dumps(out, indent=2))
     return 0
@@ -675,6 +734,138 @@ def run_prune(
   return 0
 
 
+def run_policy(
+    policy_path: Path,
+    target_path: Path,
+    *,
+    server_id: str = "",
+    target_server_id: str | None = None,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+    fail_on_violation: bool = False,
+) -> int:
+  if not policy_path.exists():
+    sys.stderr.write(f"Policy file not found: {policy_path}\n")
+    return 1
+  if not target_path.exists():
+    sys.stderr.write(f"Target JSON file not found: {target_path}\n")
+    return 1
+
+  pol_data = json.loads(policy_path.read_text(encoding="utf-8"))
+  target_data = json.loads(target_path.read_text(encoding="utf-8"))
+  engine = SessionPolicyEngine(policy=pol_data, enabled=True)
+
+  if isinstance(target_data, list):
+    report = engine.audit_session_transcript(target_data)
+  elif isinstance(target_data, dict) and isinstance(target_data.get("events"), list):
+    report = engine.audit_session_transcript(target_data["events"])
+  elif isinstance(target_data, dict):
+    dec = audit_session_policy(
+        target_data,
+        pol_data,
+        server_id=server_id,
+        target_server_id=target_server_id,
+    )
+    report = dec.to_dict()
+  else:
+    sys.stderr.write(f"Unsupported target payload in {target_path}\n")
+    return 1
+
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri=str(target_path),
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  has_violations = int(report.get("violation_count", 0)) > 0
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+  else:
+    verdict = "BLOCKED" if has_violations else "ALLOWED"
+    print(f"mcp-slim Session Policy Audit ({verdict}, violations={report.get('violation_count', 0)})")
+    print("=" * 78)
+    for v in report.get("violations", []):
+      print(f"[{v.get('rule_id', 'MS019')}:{v.get('violation_code', '')}] {v.get('message', '')}")
+    print("=" * 78)
+
+  if fail_on_violation and has_violations:
+    return 2
+  return 0
+
+
+def run_shield(
+    args_path: Path,
+    *,
+    template_type: str = "prompt",
+    uri_template: str = "",
+    max_depth: int = 1,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+    fail_on_violation: bool = False,
+) -> int:
+  if not args_path.exists():
+    sys.stderr.write(f"Arguments JSON file not found: {args_path}\n")
+    return 1
+
+  raw_obj = json.loads(args_path.read_text(encoding="utf-8"))
+  if isinstance(raw_obj, dict) and isinstance(raw_obj.get("arguments"), dict):
+    eff_args = raw_obj["arguments"]
+    eff_uri = uri_template or str(raw_obj.get("uri_template") or raw_obj.get("name") or "")
+    eff_type = (
+        str(raw_obj["template_type"])
+        if isinstance(raw_obj.get("template_type"), str)
+        else template_type
+    )
+  elif isinstance(raw_obj, dict):
+    eff_args = raw_obj
+    eff_uri = uri_template
+    eff_type = template_type
+  else:
+    sys.stderr.write(f"Expected JSON object in {args_path}\n")
+    return 1
+
+  dec = shield_template_arguments(
+      template_type=eff_type,
+      arguments=eff_args,
+      uri_template=eff_uri,
+      max_depth=max_depth,
+      block_exfiltration=True,
+  )
+  report = dec.to_dict()
+
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri=str(args_path),
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+  else:
+    verdict = "ALLOWED" if dec.allowed else "BLOCKED"
+    print(f"mcp-slim Template Argument Shield ({verdict}, violations={len(dec.violations)})")
+    print("=" * 78)
+    for v in dec.violations:
+      print(f"[{v.rule_id}:{v.violation_code}] ({v.argument_key}) {v.message}")
+    print("=" * 78)
+
+  if fail_on_violation and not dec.allowed:
+    return 2
+  return 0
+
+
 async def _inspect_stdio_server(command: list[str], timeout: float = 15.0) -> list[dict[str, Any]]:
   """Spawns a live MCP stdio server, performs initialize + tools/list handshake, and returns tools."""
   proc = await asyncio.create_subprocess_exec(
@@ -841,6 +1032,9 @@ def wrap_config(
     prune_tools: str | None = None,
     top_k_tools: int = 12,
     strict_rpc_ids: bool = False,
+    session_policy: str | None = None,
+    shield_templates: bool = False,
+    max_template_depth: int = 1,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -894,6 +1088,12 @@ def wrap_config(
         prefix.extend(["--top-k-tools", str(top_k_tools)])
     if strict_rpc_ids:
       prefix.append("--strict-rpc-ids")
+    if session_policy:
+      prefix.extend(["--session-policy", session_policy, "--server-id", str(name)])
+    if shield_templates:
+      prefix.append("--shield-templates")
+      if max_template_depth != 1:
+        prefix.extend(["--max-template-depth", str(max_template_depth)])
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -1042,6 +1242,34 @@ def main(argv: list[str] | None = None) -> int:
       "--strict-rpc-ids",
       action="store_true",
       help="Enforce stateful JSON-RPC 2.0 response ID correlation, replay blocking, and batch firewall (MS018)",
+  )
+  run_p.add_argument(
+      "--session-policy",
+      type=Path,
+      default=None,
+      help="Path to capability-scoped multi-upstream SessionPolicy JSON file (MS019)",
+  )
+  run_p.add_argument(
+      "--server-id",
+      type=str,
+      default="",
+      help="Upstream server identifier used when evaluating --session-policy scopes",
+  )
+  run_p.add_argument(
+      "--shield-templates",
+      action="store_true",
+      help="Audit prompt, resource, and completion template arguments against recursive expansion and secret exfiltration (MS020)",
+  )
+  run_p.add_argument(
+      "--max-template-depth",
+      type=int,
+      default=1,
+      help="Maximum allowed template delimiter nesting depth when --shield-templates is active (default: 1)",
+  )
+  run_p.add_argument(
+      "--sanitize-templates",
+      action="store_true",
+      help="Sanitize dangerous template tokens in-place instead of rejecting the request",
   )
   run_p.add_argument(
       "--block-roots",
@@ -1273,6 +1501,23 @@ def main(argv: list[str] | None = None) -> int:
       help="Wrap servers with --strict-rpc-ids JSON-RPC response correlation firewall",
   )
   wrap_p.add_argument(
+      "--session-policy",
+      type=str,
+      default=None,
+      help="Wrap servers with --session-policy <path> and per-entry --server-id isolation (MS019)",
+  )
+  wrap_p.add_argument(
+      "--shield-templates",
+      action="store_true",
+      help="Wrap servers with --shield-templates recursive template exfiltration shield (MS020)",
+  )
+  wrap_p.add_argument(
+      "--max-template-depth",
+      type=int,
+      default=1,
+      help="Maximum template nesting depth paired with --shield-templates (default: 1)",
+  )
+  wrap_p.add_argument(
       "--runner",
       choices=("mcp-slim", "uvx", "npx"),
       default="mcp-slim",
@@ -1435,6 +1680,74 @@ def main(argv: list[str] | None = None) -> int:
       help="Write OASIS SARIF v2.1.0 report to the specified path",
   )
 
+  policy_p = sub.add_parser(
+      "policy",
+      help="Audit an MCP JSON-RPC frame or session transcript against a capability SessionPolicy (MS019)",
+  )
+  policy_p.add_argument("policy", type=Path, help="Path to SessionPolicy JSON file")
+  policy_p.add_argument("target", type=Path, help="Path to JSON-RPC frame or transcript events JSON file")
+  policy_p.add_argument("--server-id", type=str, default="", help="Origin upstream server ID")
+  policy_p.add_argument("--target-server-id", type=str, default=None, help="Target upstream server ID")
+  policy_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON policy evaluation report",
+  )
+  policy_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
+  )
+  policy_p.add_argument(
+      "--fail-on-violation",
+      action="store_true",
+      help="Exit with code 2 when MS019 policy violations are detected",
+  )
+
+  shield_p = sub.add_parser(
+      "shield",
+      help="Audit prompt or resource template arguments for recursive expansion and exfiltration (MS020)",
+  )
+  shield_p.add_argument("file", type=Path, help="Path to template arguments JSON file")
+  shield_p.add_argument(
+      "--type",
+      choices=("prompt", "resource", "completion"),
+      default="prompt",
+      dest="template_type",
+      help="Template context type (default: prompt)",
+  )
+  shield_p.add_argument(
+      "--uri-template",
+      type=str,
+      default="",
+      help="Optional RFC 6570 URI template or prompt identifier",
+  )
+  shield_p.add_argument(
+      "--max-depth",
+      type=int,
+      default=1,
+      help="Maximum allowed delimiter nesting depth (default: 1)",
+  )
+  shield_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON template shield report",
+  )
+  shield_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
+  )
+  shield_p.add_argument(
+      "--fail-on-violation",
+      action="store_true",
+      help="Exit with code 2 when MS020 template violations are detected",
+  )
+
   inspect_p = sub.add_parser(
       "inspect",
       help="Spawn a live MCP server over stdio, query tools/list, and print a token & schema audit",
@@ -1568,6 +1881,28 @@ def main(argv: list[str] | None = None) -> int:
         sarif_path=parsed.sarif,
     )
 
+  if parsed.subcommand == "policy":
+    return run_policy(
+        parsed.policy,
+        parsed.target,
+        server_id=parsed.server_id,
+        target_server_id=parsed.target_server_id,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+        fail_on_violation=parsed.fail_on_violation,
+    )
+
+  if parsed.subcommand == "shield":
+    return run_shield(
+        parsed.file,
+        template_type=parsed.template_type,
+        uri_template=parsed.uri_template,
+        max_depth=parsed.max_depth,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+        fail_on_violation=parsed.fail_on_violation,
+    )
+
   if parsed.subcommand == "inspect":
     cmd = list(parsed.command)
     if cmd and cmd[0] == "--":
@@ -1597,6 +1932,9 @@ def main(argv: list[str] | None = None) -> int:
         prune_tools=parsed.prune_tools,
         top_k_tools=parsed.top_k_tools,
         strict_rpc_ids=parsed.strict_rpc_ids,
+        session_policy=parsed.session_policy,
+        shield_templates=parsed.shield_templates,
+        max_template_depth=parsed.max_template_depth,
     )
 
   if parsed.subcommand == "bridge":
@@ -1676,6 +2014,16 @@ def main(argv: list[str] | None = None) -> int:
         prune_tools_intent=parsed.prune_tools,
         prune_top_k=parsed.top_k_tools,
         strict_rpc_ids=parsed.strict_rpc_ids,
+        enforce_session_policy=parsed.session_policy is not None,
+        session_policy=(
+            json.loads(parsed.session_policy.read_text(encoding="utf-8"))
+            if parsed.session_policy is not None
+            else None
+        ),
+        shield_templates=parsed.shield_templates,
+        max_template_depth=parsed.max_template_depth,
+        sanitize_templates_in_place=parsed.sanitize_templates,
+        server_id=parsed.server_id,
         block_roots=parsed.block_roots,
         allow_root_prefixes=allow_root_set,
         deny_root_prefixes=deny_root_set,

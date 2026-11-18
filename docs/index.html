@@ -396,10 +396,10 @@
         <span class="badge">Zero Dependencies (Python 3.10+ / npx / uvx)</span>
         <span class="badge">-48.8% to -98.7% Context Tokens</span>
         <span class="badge">930.6 &micro;s p50 Latency</span>
-        <span class="badge">18 SARIF Security &amp; Schema Rules</span>
+        <span class="badge">20 SARIF Security &amp; Schema Rules</span>
       </div>
-      <h1>mcp-slim <span class="ver">v1.9.0</span></h1>
-      <p class="lead">Transparent Model Context Protocol (MCP) JSON-RPC 2.0 stdio proxy that compacts bloated <code>tools/list</code> schemas &amp; <code>tools/call</code> outputs, prunes oversized tool catalogs by task intent via multi-field BM25+ (<code>MS017</code>), enforces stateful JSON-RPC response correlation &amp; batch firewalls (<code>MS018</code>), repairs truncated streaming tool-call JSON (<code>MS015</code>), merges multi-server catalogs (<code>MS016</code>), and redacts leaked credentials in real time.</p>
+      <h1>mcp-slim <span class="ver">v2.0.0</span></h1>
+      <p class="lead">Transparent Model Context Protocol (MCP) JSON-RPC 2.0 stdio proxy that compacts bloated <code>tools/list</code> schemas &amp; <code>tools/call</code> outputs, enforces capability-scoped multi-upstream session policies (<code>MS019</code>), shields recursive prompt &amp; RFC 6570 resource templates against exfiltration (<code>MS020</code>), prunes oversized tool catalogs by task intent via BM25+ (<code>MS017</code>), enforces JSON-RPC response correlation firewalls (<code>MS018</code>), repairs truncated streaming tool-call JSON (<code>MS015</code>), merges multi-server catalogs (<code>MS016</code>), and redacts leaked credentials in real time.</p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/SalyyS1/mcp-slim">Star &amp; View on GitHub &rarr;</a>
         <a class="btn" href="#quick-start">Zero-Install CLI (npx / uvx)</a>
@@ -415,6 +415,7 @@
         <button class="tab-btn" id="tab-btn-v130" data-tab="panel-v130" type="button">4. Elicitation Firewall, Roots &amp; Shadowing Lab (v1.3.0)</button>
         <button class="tab-btn" id="tab-btn-v180" data-tab="panel-v180" type="button">5. Streaming JSON Repair &amp; Composite Merger (v1.8.0)</button>
         <button class="tab-btn" id="tab-btn-v190" data-tab="panel-v190" type="button">6. BM25+ Intent Pruner &amp; RPC Firewall (v1.9.0)</button>
+        <button class="tab-btn" id="tab-btn-v200" data-tab="panel-v200" type="button">7. Session Policy &amp; Template Shield (v2.0.0)</button>
       </div>
 
       <!-- TAB 1: LIVE SLIMMER -->
@@ -689,6 +690,36 @@
               <span class="pane-tag" id="v190-verdict-tag">Evaluated</span>
             </div>
             <textarea class="code-area slim-out" id="v190-output" readonly spellcheck="false" aria-label="v1.9.0 BM25 pruner or RPC firewall output"></textarea>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 7: CAPABILITY SESSION POLICY & TEMPLATE SHIELD (v2.0.0) -->
+      <div class="tab-panel" id="panel-v200">
+        <div class="control-section">
+          <div class="control-row">
+            <div class="preset-group">
+              <span class="row-label">v2.0.0 Scenarios:</span>
+              <button class="chip active" type="button" data-v200="policy_escalation">MS019: Cross-Server Namespace &amp; Reverse-RPC Escalation</button>
+              <button class="chip" type="button" data-v200="template_cycle">MS020: Cross-Argument Expansion Cycle &amp; Env Exfiltration</button>
+              <button class="chip" type="button" data-v200="uri_breakout">MS020: RFC 6570 URI Segment Breakout &amp; SSTI</button>
+            </div>
+          </div>
+        </div>
+        <div class="editor-grid">
+          <div class="pane">
+            <div class="pane-header">
+              <span>Session Policy Transcript or Template Arguments</span>
+              <span class="pane-tag">MS019 / MS020 Input</span>
+            </div>
+            <textarea class="code-area" id="v200-input" spellcheck="false" aria-label="v2.0.0 session policy or template shield input"></textarea>
+          </div>
+          <div class="pane">
+            <div class="pane-header">
+              <span>mcp-slim v2.0.0 Policy / Template Shield Verdict &amp; Sanitized Payload</span>
+              <span class="pane-tag" id="v200-verdict-tag">Evaluated</span>
+            </div>
+            <textarea class="code-area slim-out" id="v200-output" readonly spellcheck="false" aria-label="v2.0.0 session policy or template shield output"></textarea>
           </div>
         </div>
       </div>
@@ -2499,6 +2530,239 @@ mcp-slim stats</code></pre>
     v190Input.addEventListener("input", runV190Lab);
     v190Input.value = V190_SCENARIOS.bm25_prune;
     runV190Lab();
+
+    // Tab 7: Capability Session Policy (MS019) & Template Argument Shield (MS020) (v2.0.0)
+    const v200Input = document.getElementById("v200-input");
+    const v200Output = document.getElementById("v200-output");
+    const v200VerdictTag = document.getElementById("v200-verdict-tag");
+
+    const V200_SCENARIOS = {
+      policy_escalation: JSON.stringify({
+        policy: {
+          session_id: "prod-agent",
+          allow_cross_server_delegation: false,
+          allow_destructive: false,
+          allowed_upstream_ids: ["web_scraper", "analytics_db"],
+          server_scopes: {
+            web_scraper: { allowed_tools: ["fetch_*"], read_only: true, sampling_enabled: false, roots_enabled: false },
+            analytics_db: { read_only: true, allow_destructive: false, denied_resource_prefixes: ["file:///etc/"] }
+          }
+        },
+        events: [
+          { direction: "client_to_server", server_id: "web_scraper", frame: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "analytics_db__query_rows" } } },
+          { direction: "client_to_server", server_id: "analytics_db", frame: { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "delete_and_get_user", arguments: { id: 9 } } } },
+          { direction: "server_to_client", server_id: "web_scraper", frame: { jsonrpc: "2.0", id: 50, method: "roots/list", params: {} } }
+        ]
+      }, null, 2),
+      template_cycle: JSON.stringify({
+        template_type: "prompt",
+        max_depth: 1,
+        arguments: {
+          greeting: "Context {{summary}}",
+          summary: "Recursive loop {{greeting}}",
+          leak: "{{ outer {{ env.AWS_SECRET_ACCESS_KEY }} }}"
+        }
+      }, null, 2),
+      uri_breakout: JSON.stringify({
+        template_type: "resource",
+        uri_template: "https://api.corp.internal/users/{user_id}/docs/{+doc_path}",
+        arguments: {
+          user_id: "alice%252f..%252fadmin?role=owner",
+          doc_path: "2026/q4/plan.md",
+          ssti: "{{ ''.__class__.__mro__[1].__subclasses__() }}"
+        }
+      }, null, 2)
+    };
+
+    function calcTplDepth(str) {
+      const stack = [];
+      let maxD = 0;
+      let i = 0;
+      while (i < str.length) {
+        const two = str.slice(i, i + 2);
+        if (two === "{{") { stack.push("}}"); maxD = Math.max(maxD, stack.length); i += 2; continue; }
+        if (two === "${" || two === "#{") { stack.push("}"); maxD = Math.max(maxD, stack.length); i += 2; continue; }
+        if (two === "<%") { stack.push("%>"); maxD = Math.max(maxD, stack.length); i += 2; continue; }
+        if (two === "{%") { stack.push("%}"); maxD = Math.max(maxD, stack.length); i += 2; continue; }
+        if (stack.length) {
+          const exp = stack[stack.length - 1];
+          if (exp.length === 2 && two === exp) { stack.pop(); i += 2; continue; }
+          if (exp.length === 1 && str[i] === exp) { stack.pop(); i += 1; continue; }
+        }
+        i += 1;
+      }
+      return maxD;
+    }
+
+    function sanitizeTplStr(str) {
+      let c = String(str || "");
+      for (let k = 0; k < 12; k++) {
+        const nxt = c.replace(/(?:\{\{[^{}]*\}\}|\$\{[^{}]*\}|#\{[^{}]*\}|<%\s*=?\s*[^%]*?%>|\{%[^{}%]*%\})/g, "[TEMPLATE_TOKEN_STRIPPED]");
+        if (nxt === c) break;
+        c = nxt;
+      }
+      return c
+        .replace(/(?:\.\.[/\\]|%252e%252e(?:%252f|%255c)|%2e%2e(?:%2f|%5c))/gi, "[PATH_TRAVERSAL_STRIPPED]")
+        .replace(/(?:169\.254\.169\.254|fd00:ec2::254|metadata\.google\.internal)/gi, "[METADATA_STRIPPED]");
+    }
+
+    function runV200Lab() {
+      let parsed;
+      try {
+        parsed = JSON.parse(v200Input.value);
+      } catch (e) {
+        v200VerdictTag.textContent = "INVALID JSON";
+        v200Output.value = JSON.stringify({ error: e.message }, null, 2);
+        return;
+      }
+
+      if (parsed && parsed.policy && Array.isArray(parsed.events)) {
+        const pol = parsed.policy;
+        const scopes = pol.server_scopes || {};
+        const mutVerbs = new Set(["create", "update", "delete", "drop", "write", "exec", "run", "kill", "purge", "remove", "set"]);
+        const destVerbs = new Set(["delete", "drop", "destroy", "kill", "purge", "remove", "wipe"]);
+        const violations = [];
+        parsed.events.forEach((ev, idx) => {
+          const dir = String(ev.direction || "client_to_server");
+          const sid = String(ev.server_id || "default");
+          const frame = ev.frame || {};
+          const method = String(frame.method || "");
+          const params = frame.params || {};
+          let targetSid = String(ev.target_server_id || sid);
+          const tName = String(params.name || "");
+          if (method === "tools/call" && tName.includes("__")) {
+            const parts = tName.split("__");
+            if (scopes[parts[0]]) targetSid = parts[0];
+          }
+          if (dir.startsWith("client")) {
+            if (Array.isArray(pol.allowed_upstream_ids) && !pol.allowed_upstream_ids.includes(targetSid)) {
+              violations.push({ event_index: idx, rule_id: "MS019", violation_code: "UNAUTHORIZED_UPSTREAM", server_id: sid, target_server_id: targetSid, message: "Upstream '" + targetSid + "' is not permitted by session policy." });
+            }
+            if (sid !== targetSid && !pol.allow_cross_server_delegation) {
+              violations.push({ event_index: idx, rule_id: "MS019", violation_code: "CROSS_SERVER_ESCALATION", server_id: sid, target_server_id: targetSid, tool_name: tName, message: "Cross-server invocation from '" + sid + "' to '" + targetSid + "' is denied." });
+            }
+            const sc = scopes[targetSid] || {};
+            if (method === "tools/call" && tName) {
+              const bare = tName.includes("__") ? tName.split("__")[1] : tName;
+              const words = bare.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase().split(/[^a-z0-9]+/);
+              if ((pol.read_only || sc.read_only) && words.some((w) => mutVerbs.has(w))) {
+                violations.push({ event_index: idx, rule_id: "MS019", violation_code: "READ_ONLY_VIOLATION", server_id: targetSid, tool_name: tName, message: "Mutating tool '" + tName + "' invoked in read-only scope." });
+              }
+              if ((pol.allow_destructive === false || sc.allow_destructive === false) && words.some((w) => destVerbs.has(w))) {
+                violations.push({ event_index: idx, rule_id: "MS019", violation_code: "DESTRUCTIVE_TOOL_VIOLATION", server_id: targetSid, tool_name: tName, message: "Destructive tool '" + tName + "' is blocked by session policy." });
+              }
+            }
+          } else {
+            const sc = scopes[sid] || {};
+            if (method === "sampling/createMessage" && !sc.sampling_enabled) {
+              violations.push({ event_index: idx, rule_id: "MS019", violation_code: "UNAUTHORIZED_CAPABILITY", server_id: sid, method, message: "Server '" + sid + "' initiated unauthorized sampling/createMessage." });
+            }
+            if (method === "roots/list" && !sc.roots_enabled) {
+              violations.push({ event_index: idx, rule_id: "MS019", violation_code: "ROOTS_ESCALATION", server_id: sid, method, message: "Server '" + sid + "' initiated unauthorized roots/list enumeration." });
+            }
+          }
+        });
+        v200VerdictTag.textContent = violations.length ? "BLOCKED (" + violations.length + " MS019 VIOLATIONS)" : "SESSION POLICY ALLOWED";
+        v200Output.value = JSON.stringify({
+          sarif_rule: "MS019 (SessionPolicyEngine)",
+          valid: violations.length === 0,
+          total_events: parsed.events.length,
+          violation_count: violations.length,
+          violations
+        }, null, 2);
+        return;
+      }
+
+      if (parsed && parsed.arguments && typeof parsed.arguments === "object") {
+        const args = parsed.arguments;
+        const maxD = Number(parsed.max_depth !== undefined ? parsed.max_depth : 1);
+        const uriTpl = String(parsed.uri_template || "");
+        const violations = [];
+        const sanitized = {};
+        const refs = {};
+
+        Object.entries(args).forEach(([k, val]) => {
+          if (typeof val !== "string") { sanitized[k] = val; return; }
+          let dec = val;
+          try { dec = decodeURIComponent(decodeURIComponent(val)); } catch (_) {}
+          const d = Math.max(calcTplDepth(val), calcTplDepth(dec));
+          if (d > maxD) {
+            violations.push({ rule_id: "MS020", violation_code: "RECURSIVE_EXPANSION_DEPTH", argument_key: k, depth: d, message: "Template nesting depth " + d + " exceeds max_depth " + maxD + "." });
+          }
+          if (/__class__|__mro__|__subclasses__|__globals__|constructor\.prototype/i.test(dec)) {
+            violations.push({ rule_id: "MS020", violation_code: "SSTI_EXPRESSION", argument_key: k, message: "Server-side template injection (SSTI) gadget detected." });
+          }
+          if (/(?:aws_secret_access_key|openai_api_key|github_token|api_key|secret|password)/i.test(dec) && /(?:\{\{|\$\{|#\{|env\.)/.test(dec)) {
+            violations.push({ rule_id: "MS020", violation_code: "SECRET_EXFILTRATION_PAYLOAD", argument_key: k, message: "Credential environment exfiltration directive detected." });
+          }
+          refs[k] = [];
+          const reRef = /\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}|\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}/g;
+          let m;
+          while ((m = reRef.exec(val)) !== null) {
+            const target = m[1] || m[2];
+            if (args[target] !== undefined) refs[k].push(target);
+          }
+          sanitized[k] = sanitizeTplStr(val);
+        });
+
+        // Cycle check
+        Object.keys(refs).forEach((start) => {
+          const seen = [start];
+          let curr = refs[start][0];
+          while (curr) {
+            if (curr === start) {
+              violations.push({ rule_id: "MS020", violation_code: "CROSS_ARG_EXPANSION_CYCLE", argument_key: start, message: "Cross-argument cycle detected: " + seen.concat([curr]).join(" -> ") });
+              break;
+            }
+            if (seen.includes(curr)) break;
+            seen.push(curr);
+            curr = (refs[curr] || [])[0];
+          }
+        });
+
+        // RFC 6570 single-segment breakout check
+        if (uriTpl) {
+          const exprRe = /\{([+#./;?&]?)([^{}]+)\}/g;
+          let em;
+          while ((em = exprRe.exec(uriTpl)) !== null) {
+            const op = em[1];
+            if (op === "+" || op === "#") continue;
+            em[2].split(",").forEach((vSpec) => {
+              const vn = vSpec.trim();
+              const rawV = args[vn];
+              if (typeof rawV === "string") {
+                let decV = rawV;
+                try { decV = decodeURIComponent(decodeURIComponent(rawV)); } catch (_) {}
+                if (/[/?#\\]|\.\./.test(decV)) {
+                  violations.push({ rule_id: "MS020", violation_code: "URI_TEMPLATE_SEGMENT_BREAKOUT", argument_key: vn, message: "Parameter '" + vn + "' breaks out of RFC 6570 '{" + op + vn + "}' placeholder." });
+                }
+              }
+            });
+          }
+        }
+
+        v200VerdictTag.textContent = violations.length ? "BLOCKED (" + violations.length + " MS020 VIOLATIONS)" : "TEMPLATE ARGS CLEAN";
+        v200Output.value = JSON.stringify({
+          sarif_rule: "MS020 (TemplateArgumentShield)",
+          allowed: violations.length === 0,
+          violation_count: violations.length,
+          violations,
+          sanitized_arguments: sanitized
+        }, null, 2);
+      }
+    }
+
+    document.querySelectorAll("[data-v200]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("[data-v200]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        v200Input.value = V200_SCENARIOS[btn.dataset.v200];
+        runV200Lab();
+      });
+    });
+    v200Input.addEventListener("input", runV200Lab);
+    v200Input.value = V200_SCENARIOS.policy_escalation;
+    runV200Lab();
   })();
   </script>
 </body>

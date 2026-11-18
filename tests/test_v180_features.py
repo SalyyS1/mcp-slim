@@ -472,7 +472,7 @@ class TestCliServeAndSarifV180(unittest.TestCase):
             run0 = sarif["runs"][0]
             self.assertEqual(run0["tool"]["driver"]["version"], mcp_slim.__version__)
             rule_ids = [r["id"] for r in run0["tool"]["driver"]["rules"]]
-            self.assertEqual(len(rule_ids), 18)
+            self.assertEqual(len(rule_ids), 20)
             self.assertIn("MS015", rule_ids)
             self.assertIn("MS016", rule_ids)
 

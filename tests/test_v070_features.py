@@ -246,6 +246,8 @@ class TestMcpSlimV070(unittest.TestCase):
             "merge_mcp_manifests",
             "filter_tools_for_intent",
             "audit_rpc_transcript",
+            "evaluate_session_policy",
+            "shield_mcp_template_args",
             "get_slim_stats",
         },
     )

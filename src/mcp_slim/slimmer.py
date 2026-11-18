@@ -179,6 +179,8 @@ class SlimStats:
   json_repairs: int = 0
   tools_pruned: int = 0
   rpc_spoofs_blocked: int = 0
+  policy_violations_blocked: int = 0
+  template_exfiltrations_blocked: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -2125,6 +2127,30 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "defaultConfiguration": {"level": "error"},
         "properties": {"tags": ["security", "mcp", "json-rpc", "integrity"], "security-severity": "8.8"},
     },
+    {
+        "id": "MS019",
+        "name": "CrossServerCapabilityEscalation",
+        "shortDescription": {
+            "text": "MCP session or upstream server attempted unauthorized capability escalation or cross-server privilege traversal."
+        },
+        "help": {
+            "text": "Enforce capability-scoped session boundaries via SessionPolicyEngine (--enforce-session-policy) to restrict ungranted methods, write operations in read-only sessions, and unauthorized cross-server tool invocations."
+        },
+        "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "session-policy", "access-control"], "security-severity": "8.9"},
+    },
+    {
+        "id": "MS020",
+        "name": "RecursiveTemplateArgumentExfiltration",
+        "shortDescription": {
+            "text": "MCP prompt or resource template arguments contain recursive expansion directives, path traversal, or secret exfiltration payloads."
+        },
+        "help": {
+            "text": "Enable TemplateArgumentShield (--shield-template-arguments) to sanitize recursive template tokens ({{...}}, ${...}), block path traversal, and neutralize environment variable exfiltration in prompts/get and resources/read."
+        },
+        "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "template-injection", "exfiltration"], "security-severity": "8.6"},
+    },
 )
 
 
@@ -3559,6 +3585,12 @@ def build_audit_sarif(
       "tools_after",
       "direction",
       "rpc_id",
+      "violating_server",
+      "attempted_capability",
+      "target_server",
+      "template_type",
+      "argument_key",
+      "expansion_depth",
   )
 
   for f in report.get("findings", []):
@@ -3570,6 +3602,10 @@ def build_audit_sarif(
       loc_kind = "resource"
     elif rule_id == "MS007":
       loc_kind = "elicitation"
+    elif rule_id == "MS019":
+      loc_kind = "session"
+    elif rule_id == "MS020":
+      loc_kind = "template"
     else:
       loc_kind = "function"
     logical_loc: dict[str, Any] = {"name": loc_name, "kind": loc_kind}
@@ -4048,25 +4084,47 @@ from ._ms017_ms018 import (  # noqa: E402
     filter_tools_for_intent,
     tokenize_mcp_text,
 )
+from ._ms019_ms020 import (  # noqa: E402
+    CapabilityScope,
+    PolicyDecision,
+    PolicyViolation,
+    SessionPolicy,
+    SessionPolicyEngine,
+    TemplateArgumentDecision,
+    TemplateArgumentShield,
+    TemplateShieldViolation,
+    audit_session_policy,
+    shield_template_arguments,
+)
 
 __all__ = [
+    "CapabilityScope",
     "CollisionReport",
     "CompositeMergeResult",
     "CompositeSchemaMerger",
     "JsonRepairResult",
     "JsonRpcResponseFirewall",
     "NamespaceRoutingResult",
+    "PolicyDecision",
+    "PolicyViolation",
     "RefDepthGuard",
     "RefDepthReport",
     "RpcFirewallDecision",
     "RpcFirewallViolation",
+    "SessionPolicy",
+    "SessionPolicyEngine",
+    "TemplateArgumentDecision",
+    "TemplateArgumentShield",
+    "TemplateShieldViolation",
     "ToolCallJsonRepairer",
     "ToolCatalogPruner",
     "ToolNamespaceRouter",
     "ToolPruneResult",
     "audit_rpc_transcript",
+    "audit_session_policy",
     "filter_tools_for_intent",
     "merge_server_manifests",
     "repair_truncated_json",
+    "shield_template_arguments",
     "tokenize_mcp_text",
 ]

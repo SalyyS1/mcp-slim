@@ -2,7 +2,7 @@
 
 Evaluates SchemaSlimmer, OutputSlimmer, SecretGuard, and MCPProxy on:
   1. Real MCP tool definitions (mcp-server-git, mcp-server-filesystem,
-     mcp-server-postgres, mcp-server-github — 60 tools total).
+     mcp-server-postgres, mcp-server-github - 60 tools total).
   2. Real-world JSON tool outputs (GitHub repository search results, database
      rows, directory trees, and log outputs containing secrets).
   3. Microsecond-level latency percentiles (p50, p95, p99), message throughput
@@ -30,7 +30,14 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from mcp_slim.guard import SecretGuard  # noqa: E402
 from mcp_slim.proxy import MCPProxy  # noqa: E402
-from mcp_slim.slimmer import OutputSlimmer, SchemaSlimmer, SlimStats, estimate_tokens  # noqa: E402
+from mcp_slim.slimmer import (  # noqa: E402
+    OutputSlimmer,
+    SchemaSlimmer,
+    SessionPolicyEngine,
+    SlimStats,
+    TemplateArgumentShield,
+    estimate_tokens,
+)
 
 
 def _build_filesystem_tools() -> list[dict[str, Any]]:
@@ -666,7 +673,47 @@ def main() -> int:
       lambda: out_slimmer.slim_call_result(sample_call),
   )
 
-  proxy = MCPProxy(quiet=True)
+  pol_engine = SessionPolicyEngine(
+      policy={
+          "session_id": "bench",
+          "allow_cross_server_delegation": False,
+          "server_scopes": {
+              "git": {"read_only": True, "sampling_enabled": False},
+              "postgres": {"allowed_tools": ["query_*", "select_*"], "read_only": True},
+          },
+      },
+      enabled=True,
+  )
+  pol_frame = {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "method": "tools/call",
+      "params": {"name": "postgres__query_users", "arguments": {"limit": 25}},
+  }
+  pol_bytes = len(json.dumps(pol_frame).encode("utf-8"))
+  bench_stage(
+      "SessionPolicyEngine (MS019)",
+      "Multi-upstream scope + escalation check",
+      pol_bytes,
+      lambda: pol_engine.evaluate_client_request(pol_frame, server_id="postgres"),
+  )
+
+  tpl_shield = TemplateArgumentShield(enabled=True, max_depth=1, block_exfiltration=True)
+  tpl_args = {
+      "doc": "reports/q4-summary.md",
+      "header": "Quarterly summary for {{team_name}}",
+  }
+  tpl_bytes = len(json.dumps(tpl_args).encode("utf-8"))
+  bench_stage(
+      "TemplateArgumentShield (MS020)",
+      "Stack depth + cycle + RFC 6570 check",
+      tpl_bytes,
+      lambda: tpl_shield.audit_arguments(
+          tpl_args, template_type="resource", uri_template="file:///workspace/{+doc}"
+      ),
+  )
+
+  proxy = MCPProxy(quiet=True, no_stats=True)
 
   def run_full_proxy_turn() -> None:
     proxy.process_client_message(rpc_call_req)
