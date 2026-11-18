@@ -108,6 +108,8 @@ def _is_redundant_param_description(prop_name: str, desc: str) -> bool:
   for part in name_parts:
     allowed_words.add(part)
     allowed_words.add(part + "s")
+    if len(part) > 3 and part.endswith("s"):
+      allowed_words.add(part[:-1])
     allowed_words.update(_ABBREV_EXPANSIONS.get(part, ()))
   return all(w in allowed_words for w in norm_desc_words)
 
@@ -173,6 +175,7 @@ class SlimStats:
   stream_chunks_sanitized: int = 0
   elicitations_guarded: int = 0
   roots_filtered: int = 0
+  ref_hints_preserved: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -267,6 +270,47 @@ class _RefContext:
   memo: dict[str, tuple[Any, int]] = field(default_factory=dict)
   total_inlined: int = 0
   cycle_tainted: int = 0
+  synthesized_hint_nodes: set[int] = field(default_factory=set)
+
+
+_CLEAN_DEF_IDENT_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _extract_ref_def_name(ref_str: str) -> str | None:
+  """Returns the decoded definition name for top-level `#/$defs/<Name>` or `#/definitions/<Name>` pointers."""
+  if not isinstance(ref_str, str) or not ref_str.startswith("#/"):
+    return None
+  segments = [_decode_pointer_segment(s) for s in ref_str[2:].split("/")]
+  if len(segments) != 2 or segments[0] not in ("$defs", "definitions"):
+    return None
+  def_name = segments[1]
+  if not _CLEAN_DEF_IDENT_RE.match(def_name):
+    return None
+  return def_name
+
+
+def _humanize_def_identifier(def_name: str, *, require_compound: bool = True) -> str:
+  """Converts a PascalCase/snake_case definition identifier into a concise semantic hint."""
+  spaced = re.sub(
+      r"([a-z0-9])([A-Z])",
+      r"\1 \2",
+      re.sub(r"([A-Z]{2,})([A-Z][a-z])", r"\1 \2", def_name),
+  )
+  words = [w for w in re.split(r"[_\-\s]+", spaced.strip()) if w]
+  if not words:
+    return ""
+  if require_compound and (len(words) < 2 or any(len(w) < 2 for w in words)):
+    return ""
+  if not require_compound and len(words[0]) < 2:
+    return ""
+  formatted: list[str] = []
+  for idx, w in enumerate(words):
+    is_acronym = len(w) >= 2 and sum(1 for ch in w if ch.isupper()) >= 2
+    if idx == 0:
+      formatted.append(w if is_acronym else (w[0].upper() + w[1:].lower()))
+    else:
+      formatted.append(w if is_acronym else w.lower())
+  return " ".join(formatted)
 
 
 def _decode_pointer_segment(segment: str) -> str:
@@ -353,6 +397,7 @@ class SchemaSlimmer:
       canonical_sort: bool = True,
       preserve_root_unions: bool = False,
       read_only_only: bool = False,
+      preserve_ref_hints: bool = True,
   ) -> None:
     self.max_desc_chars = max_desc_chars
     self.max_param_desc_chars = max_param_desc_chars
@@ -362,6 +407,7 @@ class SchemaSlimmer:
     self.canonical_sort = canonical_sort
     self.preserve_root_unions = preserve_root_unions
     self.read_only_only = read_only_only
+    self.preserve_ref_hints = preserve_ref_hints
     self._tool_param_types: dict[str, dict[str, str]] = {}
     self._tool_union_contracts: dict[str, UnionContract] = {}
     self._tool_annotations: dict[str, dict[str, bool]] = {}
@@ -498,6 +544,23 @@ class SchemaSlimmer:
               )
             else:
               merged[k] = v
+        if (
+            self.preserve_ref_hints
+            and "description" not in merged
+            and (merged.get("type") == "object" or "properties" in merged)
+        ):
+          def_name = _extract_ref_def_name(node["$ref"])
+          if def_name:
+            hint = _humanize_def_identifier(def_name, require_compound=True)
+            if hint:
+              compact_hint = compact_description(
+                  hint, max_chars=self.max_param_desc_chars
+              )
+              if compact_hint:
+                merged["description"] = compact_hint
+                ctx.synthesized_hint_nodes.add(id(merged))
+                if stats is not None:
+                  stats.ref_hints_preserved += 1
         return merged
 
     out: dict[str, Any] = {}
@@ -542,6 +605,19 @@ class SchemaSlimmer:
             desc = slimmed_prop.get("description", "")
             if desc and _is_redundant_param_description(prop_name, desc):
               slimmed_prop.pop("description", None)
+              if id(slimmed_prop) in ctx.synthesized_hint_nodes and stats is not None:
+                stats.ref_hints_preserved = max(0, stats.ref_hints_preserved - 1)
+            items_node = slimmed_prop.get("items")
+            if (
+                slimmed_prop.get("type") == "array"
+                and isinstance(items_node, dict)
+                and id(items_node) in ctx.synthesized_hint_nodes
+            ):
+              item_desc = items_node.get("description", "")
+              if item_desc and _is_redundant_param_description(prop_name, item_desc):
+                items_node.pop("description", None)
+                if stats is not None:
+                  stats.ref_hints_preserved = max(0, stats.ref_hints_preserved - 1)
           props[prop_name] = slimmed_prop
         out[k] = props
         continue
@@ -598,8 +674,11 @@ class SchemaSlimmer:
               ctx=ctx,
           )
           if isinstance(merged, dict):
+            had_own_desc = "description" in out
             for mk, mv in merged.items():
               out.setdefault(mk, mv)
+            if not had_own_desc and id(merged) in ctx.synthesized_hint_nodes:
+              ctx.synthesized_hint_nodes.add(id(out))
           continue
         raw_slimmed_branches = [
             self._slim_schema_node_impl(
@@ -612,6 +691,33 @@ class SchemaSlimmer:
             )
             for branch in non_null
         ]
+        if self.preserve_ref_hints and k in ("anyOf", "oneOf") and len(non_null) >= 2:
+          branch_def_names = {
+              name
+              for b in non_null
+              if isinstance(b, dict)
+              for name in [_extract_ref_def_name(str(b.get("$ref", "")))]
+              if name is not None
+          }
+          if len(branch_def_names) >= 2:
+            for raw_b, slim_b in zip(non_null, raw_slimmed_branches):
+              if (
+                  isinstance(raw_b, dict)
+                  and isinstance(slim_b, dict)
+                  and "description" not in slim_b
+                  and (slim_b.get("type") == "object" or "properties" in slim_b)
+              ):
+                b_def = _extract_ref_def_name(str(raw_b.get("$ref", "")))
+                if b_def:
+                  b_hint = compact_description(
+                      _humanize_def_identifier(b_def, require_compound=False),
+                      max_chars=self.max_param_desc_chars,
+                  )
+                  if b_hint:
+                    slim_b["description"] = b_hint
+                    ctx.synthesized_hint_nodes.add(id(slim_b))
+                    if stats is not None:
+                      stats.ref_hints_preserved += 1
         deduped_pairs: list[tuple[Any, Any]] = []
         seen_sigs: set[str] = set()
         for raw_b, slim_b in zip(non_null, raw_slimmed_branches):
@@ -3083,10 +3189,167 @@ class ToolCallReplayGuard:
     return None
 
 
+_DEFAULT_AMBIGUOUS_REF_CASES: tuple[dict[str, Any], ...] = (
+    {
+        "tool": {
+            "name": "route_shipment",
+            "description": (
+                "Create an outbound logistics shipment between two physical addresses. "
+                "Validates street, city, and postal code before booking carrier pickup."
+            ),
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "RouteShipmentInput",
+                "type": "object",
+                "additionalProperties": False,
+                "$defs": {
+                    "ShippingAddress": {
+                        "title": "ShippingAddress",
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "street": {"title": "Street", "type": "string", "description": "The street"},
+                            "city": {"title": "City", "type": "string", "description": "The city"},
+                            "postal_code": {"title": "Postal Code", "type": "string", "description": "The postal code"},
+                        },
+                        "required": ["street", "city", "postal_code"],
+                    },
+                    "BillingAddress": {
+                        "title": "BillingAddress",
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "street": {"title": "Street", "type": "string", "description": "The street"},
+                            "city": {"title": "City", "type": "string", "description": "The city"},
+                            "postal_code": {"title": "Postal Code", "type": "string", "description": "The postal code"},
+                        },
+                        "required": ["street", "city", "postal_code"],
+                    },
+                },
+                "properties": {
+                    "primary": {"$ref": "#/$defs/ShippingAddress"},
+                    "secondary": {"$ref": "#/$defs/BillingAddress"},
+                    "shipping_address": {"$ref": "#/$defs/ShippingAddress", "default": None},
+                },
+                "required": ["primary", "secondary"],
+            },
+        },
+        "expected_roles": {
+            "primary": "shipping",
+            "secondary": "billing",
+            "shipping_address": "shipping",
+        },
+    },
+    {
+        "tool": {
+            "name": "transfer_funds",
+            "description": (
+                "Transfer funds between two ledger accounts with IBAN and ISO currency "
+                "validation. Supports direct account references and union counterparty targets."
+            ),
+            "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "title": "TransferFundsInput",
+                "type": "object",
+                "additionalProperties": False,
+                "$defs": {
+                    "SourceAccount": {
+                        "title": "SourceAccount",
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "iban": {"title": "Iban", "type": "string", "description": "The iban"},
+                            "currency": {"title": "Currency", "type": "string", "description": "The currency"},
+                        },
+                        "required": ["iban", "currency"],
+                    },
+                    "DestinationAccount": {
+                        "title": "DestinationAccount",
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "iban": {"title": "Iban", "type": "string", "description": "The iban"},
+                            "currency": {"title": "Currency", "type": "string", "description": "The currency"},
+                        },
+                        "required": ["iban", "currency"],
+                    },
+                },
+                "properties": {
+                    "first": {"$ref": "#/$defs/SourceAccount"},
+                    "second": {"$ref": "#/$defs/DestinationAccount"},
+                    "target_union": {
+                        "anyOf": [
+                            {"$ref": "#/$defs/SourceAccount"},
+                            {"$ref": "#/$defs/DestinationAccount"},
+                        ]
+                    },
+                },
+                "required": ["first", "second"],
+            },
+        },
+        "expected_roles": {
+            "first": "source",
+            "second": "destination",
+        },
+        "expected_union_branches": {"target_union": 2},
+    },
+)
+
+
+def evaluate_ref_disambiguation(
+    cases: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+  """Evaluates semantic role retention and token delta between structural-only and hint-preserving `$ref` inlining."""
+  eval_cases = list(cases) if cases is not None else list(_DEFAULT_AMBIGUOUS_REF_CASES)
+  raw_tools = [c["tool"] for c in eval_cases]
+
+  structural_slimmer = SchemaSlimmer(preserve_ref_hints=False)
+  semantic_slimmer = SchemaSlimmer(preserve_ref_hints=True)
+
+  structural_stats = SlimStats()
+  semantic_stats = SlimStats()
+
+  structural_tools = structural_slimmer.slim_tools_list(raw_tools, stats=structural_stats)
+  semantic_tools = semantic_slimmer.slim_tools_list(raw_tools, stats=semantic_stats)
+
+  def _score(slimmed_list: list[dict[str, Any]]) -> tuple[int, int]:
+    correct = 0
+    total = 0
+    for case, slim_tool in zip(eval_cases, slimmed_list):
+      props = slim_tool.get("inputSchema", {}).get("properties", {})
+      for prop_name, role_kw in case.get("expected_roles", {}).items():
+        total += 1
+        prop_node = props.get(prop_name, {})
+        haystack = f"{prop_name} {prop_node.get('description', '')}".lower()
+        if role_kw.lower() in haystack:
+          correct += 1
+      for union_prop, expected_cnt in case.get("expected_union_branches", {}).items():
+        total += 1
+        u_node = props.get(union_prop, {})
+        branches = u_node.get("anyOf") or u_node.get("oneOf") or []
+        if len(branches) == expected_cnt:
+          correct += 1
+    return correct, total
+
+  struct_ok, total_checks = _score(structural_tools)
+  sem_ok, _ = _score(semantic_tools)
+
+  return {
+      "total_checks": total_checks,
+      "structural_only_accuracy": round(struct_ok / max(1, total_checks), 4),
+      "semantic_hint_accuracy": round(sem_ok / max(1, total_checks), 4),
+      "raw_tokens": semantic_stats.schema_tokens_before,
+      "structural_only_tokens": structural_stats.schema_tokens_after,
+      "semantic_hint_tokens": semantic_stats.schema_tokens_after,
+      "extra_hint_tokens": semantic_stats.schema_tokens_after - structural_stats.schema_tokens_after,
+      "ref_hints_preserved": semantic_stats.ref_hints_preserved,
+  }
+
+
 def build_audit_sarif(
     report: dict[str, Any],
     source_uri: str = "tools.json",
-    version: str = "1.4.0",
+    version: str = "1.5.0",
 ) -> dict[str, Any]:
   """Formats an `audit_tools_manifest`, `diff_tools_manifests`, `audit_resources_manifest`, or `audit_elicitation_request` report as OASIS SARIF v2.1.0."""
   results: list[dict[str, Any]] = []

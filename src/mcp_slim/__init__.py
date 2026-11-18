@@ -1,6 +1,6 @@
 """mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 from .guard import (
     RedactionReport,
@@ -34,6 +34,7 @@ from .slimmer import (
     detect_tool_shadowing,
     diff_tools_manifests,
     estimate_tokens,
+    evaluate_ref_disambiguation,
     scan_tool_result_for_injection,
 )
 from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
@@ -70,6 +71,7 @@ __all__ = [
     "detect_tool_shadowing",
     "diff_tools_manifests",
     "estimate_tokens",
+    "evaluate_ref_disambiguation",
     "scan_tool_result_for_injection",
     "handle_server_rpc",
     "run_serve",

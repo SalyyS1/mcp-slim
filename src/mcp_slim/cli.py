@@ -805,6 +805,11 @@ def main(argv: list[str] | None = None) -> int:
       help="Keep root anyOf/oneOf JSON Schemas unflattened instead of adapting them for strict LLM providers",
   )
   run_p.add_argument(
+      "--no-ref-hints",
+      action="store_true",
+      help="Disable semantic definition-name hints when inlining undocumented object $refs",
+  )
+  run_p.add_argument(
       "--no-stats",
       action="store_true",
       help="Disable persistent token & cost telemetry for this session (or set MCP_SLIM_NO_STATS=1)",
@@ -1154,6 +1159,7 @@ def main(argv: list[str] | None = None) -> int:
             deny_tools=deny_set,
             preserve_root_unions=parsed.preserve_root_unions,
             read_only_only=parsed.read_only,
+            preserve_ref_hints=not parsed.no_ref_hints,
         ),
         output_slimmer=OutputSlimmer(tabular_arrays=parsed.tabular_arrays),
         secret_guard=SecretGuard(

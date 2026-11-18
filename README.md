@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v1.3.0](https://img.shields.io/badge/version-v1.3.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.3.0)
+[![Version: v1.5.0](https://img.shields.io/badge/version-v1.5.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.5.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.3.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.5.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -54,7 +54,7 @@ flowchart LR
 | **Schema-Guided Argument Type Coercion (`tools/call`)** | No | No | No | No | **Yes (Auto-coerces stringified int/float/bool/JSON)** |
 | **Wildcard Glob & `--read-only` Policy (`ToolAnnotations`)** | No | Exact names | No | No | **Yes (`--allow-tools`, `--deny-tools`, `--read-only`)** |
 | **Resource URI & Workspace `roots/list` Boundary Guard** | No | No | No | No | **Yes (`--allow-resource-prefixes`, `--block-roots`, `--allow-root-prefixes`)** |
-| **Recursive `$defs`/`$ref` Inlining, Cycle Breaking & DAG Dedup** | No | No | No | No | **Yes (RFC 6901 pointers, cycle stubs, union dedup)** |
+| **Recursive `$defs`/`$ref` Inlining, Cycle Breaking & Semantic Hints** | No | No | No | No | **Yes (RFC 6901 pointers, cycle stubs, non-redundant `$ref` role hints)** |
 | **`tools/call`, `resources/read` & `prompts/get` Compaction** | No | No | No | No | **Yes (-43%+ output tokens, UTF-8 base64 `blob` scrubbing)** |
 | **Sliding Token-Window Output Governor (`--token-budget`)** | No | No | No | No | **Yes (Exponential throttling with smooth turn recovery)** |
 | **Streaming Tool-Call & Notification Sanitizer** | No | No | No | No | **Yes (Zero-leak chunk reassembly, padding-overflow defense)** |

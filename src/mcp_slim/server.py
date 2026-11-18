@@ -44,6 +44,10 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                     "type": "boolean",
                     "description": "Keep root anyOf/oneOf schemas intact instead of flattening.",
                 },
+                "preserve_ref_hints": {
+                    "type": "boolean",
+                    "description": "Preserve semantic definition hints when inlining undocumented object $refs (default true).",
+                },
             },
             "required": ["tools"],
         },
@@ -273,6 +277,9 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
   if method in ("resources/list",):
     return {"jsonrpc": "2.0", "id": msg_id, "result": {"resources": []}}
 
+  if method in ("resources/templates/list",):
+    return {"jsonrpc": "2.0", "id": msg_id, "result": {"resourceTemplates": []}}
+
   if method in ("prompts/list",):
     return {"jsonrpc": "2.0", "id": msg_id, "result": {"prompts": []}}
 
@@ -291,6 +298,7 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
       slimmer = SchemaSlimmer(
           max_desc_chars=int(args.get("max_desc_chars", 120)),
           preserve_root_unions=bool(args.get("preserve_root_unions", False)),
+          preserve_ref_hints=bool(args.get("preserve_ref_hints", True)),
       )
       stats = SlimStats()
       compacted = slimmer.slim_tools_list(tools, stats=stats)
@@ -305,6 +313,7 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
               "reduction_pct": stats.reduction_pct,
               "refs_inlined": stats.refs_inlined,
               "refs_deduped": stats.refs_deduped,
+              "ref_hints_preserved": stats.ref_hints_preserved,
               "cycles_broken": stats.cycles_broken,
               "tools": compacted,
           }),
