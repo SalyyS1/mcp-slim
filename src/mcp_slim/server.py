@@ -16,8 +16,10 @@ from .slimmer import (
     SlimStats,
     TokenWindowGovernor,
     ToolCallJsonRepairer,
+    ToolCatalogPruner,
     audit_elicitation_request,
     audit_resources_manifest,
+    audit_rpc_transcript,
     audit_tools_manifest,
     diff_tools_manifests,
 )
@@ -264,6 +266,71 @@ SERVER_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["servers"],
+        },
+    },
+    {
+        "name": "filter_tools_for_intent",
+        "description": (
+            "Rank and prune an MCP tools/list catalog for a task intent using "
+            "multi-field BM25+ subword scoring (MS017)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "tools": {
+                    "type": "array",
+                    "description": "Array of MCP tool definitions to score and prune.",
+                    "items": {"type": "object"},
+                },
+                "intent": {
+                    "type": "string",
+                    "description": "Natural-language task description or query keywords.",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum matched tools to retain (default 12).",
+                },
+                "min_score_ratio": {
+                    "type": "number",
+                    "description": "Relative score cutoff [0.0..1.0] vs top match (default 0.15).",
+                },
+                "always_keep": {
+                    "type": "array",
+                    "description": "Optional exact tool names or glob patterns always retained.",
+                    "items": {"type": "string"},
+                },
+                "slim_schemas": {
+                    "type": "boolean",
+                    "description": "Also compact retained tool schemas with SchemaSlimmer.",
+                },
+            },
+            "required": ["tools", "intent"],
+        },
+    },
+    {
+        "name": "audit_rpc_transcript",
+        "description": (
+            "Audit an ordered sequence of client/server JSON-RPC 2.0 frames for "
+            "unsolicited response IDs, duplicate-ID replay, and batch smuggling (MS018)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "description": "Array of {direction: 'client'|'server', message: <object|array|string>} events.",
+                    "items": {"type": "object"},
+                },
+                "allow_batches": {
+                    "type": "boolean",
+                    "description": "Permit correlated JSON-RPC batch arrays (default true).",
+                },
+                "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum allowed JSON-RPC batch array size (default 32).",
+                },
+            },
+            "required": ["events"],
         },
     },
     {
@@ -593,6 +660,75 @@ def handle_server_rpc(msg: dict[str, Any]) -> dict[str, Any] | None:
           "jsonrpc": "2.0",
           "id": msg_id,
           "result": _text_result(merged_res.to_audit_report()),
+      }
+
+    if name == "filter_tools_for_intent":
+      tools_in = args.get("tools")
+      intent_str = args.get("intent")
+      if not isinstance(tools_in, list) or not isinstance(intent_str, str):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(
+                "Parameters 'tools' (array) and 'intent' (string) are required.",
+                is_error=True,
+            ),
+        }
+      raw_keep = args.get("always_keep")
+      keep_list = (
+          [str(x) for x in raw_keep if isinstance(x, str) and x.strip()]
+          if isinstance(raw_keep, list)
+          else None
+      )
+      try:
+        pruner = ToolCatalogPruner(
+            intent=intent_str,
+            top_k=int(args.get("top_k", 12) or 12),
+            min_score_ratio=float(
+                args.get("min_score_ratio", 0.15)
+                if args.get("min_score_ratio") is not None
+                else 0.15
+            ),
+            always_keep=keep_list,
+            slim_schemas=bool(args.get("slim_schemas", False)),
+        )
+      except ValueError as exc:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(str(exc), is_error=True),
+        }
+      pruned_res = pruner.prune(tools_in)
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(pruned_res.to_audit_report()),
+      }
+
+    if name == "audit_rpc_transcript":
+      events_in = args.get("events")
+      if not isinstance(events_in, list):
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result("Parameter 'events' must be a JSON array.", is_error=True),
+        }
+      try:
+        rep_rpc = audit_rpc_transcript(
+            events_in,
+            allow_batches=bool(args.get("allow_batches", True)),
+            max_batch_size=int(args.get("max_batch_size", 32) or 32),
+        )
+      except ValueError as exc:
+        return {
+            "jsonrpc": "2.0",
+            "id": msg_id,
+            "result": _text_result(str(exc), is_error=True),
+        }
+      return {
+          "jsonrpc": "2.0",
+          "id": msg_id,
+          "result": _text_result(rep_rpc),
       }
 
     if name == "get_slim_stats":

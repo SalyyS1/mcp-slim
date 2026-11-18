@@ -177,6 +177,8 @@ class SlimStats:
   roots_filtered: int = 0
   ref_hints_preserved: int = 0
   json_repairs: int = 0
+  tools_pruned: int = 0
+  rpc_spoofs_blocked: int = 0
 
   @property
   def total_tokens_before(self) -> int:
@@ -2099,6 +2101,30 @@ AUDIT_SARIF_RULES: tuple[dict[str, Any], ...] = (
         "defaultConfiguration": {"level": "warning"},
         "properties": {"tags": ["reliability", "security", "mcp", "composite-schema"], "security-severity": "6.5"},
     },
+    {
+        "id": "MS017",
+        "name": "IntentToolCatalogPruning",
+        "shortDescription": {
+            "text": "Large MCP tools/list catalog exposes excessive static schema overhead or was pruned by BM25+ task intent ranking."
+        },
+        "help": {
+            "text": "Prune large tool catalogs per task with ToolCatalogPruner (--prune-tools / mcp-slim prune) or enable --lazy on-demand discovery."
+        },
+        "defaultConfiguration": {"level": "note"},
+        "properties": {"tags": ["performance", "mcp", "token-budget", "bm25"]},
+    },
+    {
+        "id": "MS018",
+        "name": "JsonRpcResponseSpoofing",
+        "shortDescription": {
+            "text": "MCP server sent an unsolicited, type-confused, duplicate-ID, null-ID, or batch-smuggled JSON-RPC 2.0 response."
+        },
+        "help": {
+            "text": "Enable --strict-rpc-ids (JsonRpcResponseFirewall) to enforce stateful JSON-RPC 2.0 request-ID correlation and reject spoofed or replayed frames."
+        },
+        "defaultConfiguration": {"level": "error"},
+        "properties": {"tags": ["security", "mcp", "json-rpc", "integrity"], "security-severity": "8.8"},
+    },
 )
 
 
@@ -2646,6 +2672,18 @@ def audit_tools_manifest(
         "read_only": slimmer.is_read_only_tool(name, tool=raw_t),
         "security_categories": cats,
         "shadowing_hazards": shadow_reasons,
+    })
+
+  if len(per_tool) >= 40:
+    findings.append({
+        "rule_id": "MS017",
+        "level": "note",
+        "tool": "tools/list",
+        "tools_before": len(per_tool),
+        "message": (
+            f"Catalog exposes {len(per_tool)} tools ({stats_std.schema_tokens_before} raw tokens); "
+            "use --prune-tools <intent> or --lazy to reduce per-turn schema context overhead."
+        ),
     })
 
   std_pct = round(
@@ -3517,6 +3555,10 @@ def build_audit_sarif(
       "categories",
       "args_hash",
       "result_hash",
+      "tools_before",
+      "tools_after",
+      "direction",
+      "rpc_id",
   )
 
   for f in report.get("findings", []):
@@ -3588,6 +3630,9 @@ def build_audit_sarif(
       "servers_merged",
       "tools_input",
       "tools_output",
+      "tools_pruned",
+      "frames_evaluated",
+      "frames_blocked",
       "tokens_raw",
       "tokens_slim",
       "security_findings",
@@ -3993,17 +4038,35 @@ from ._ms015_ms016 import (  # noqa: E402
     merge_server_manifests,
     repair_truncated_json,
 )
+from ._ms017_ms018 import (  # noqa: E402
+    JsonRpcResponseFirewall,
+    RpcFirewallDecision,
+    RpcFirewallViolation,
+    ToolCatalogPruner,
+    ToolPruneResult,
+    audit_rpc_transcript,
+    filter_tools_for_intent,
+    tokenize_mcp_text,
+)
 
 __all__ = [
     "CollisionReport",
     "CompositeMergeResult",
     "CompositeSchemaMerger",
     "JsonRepairResult",
+    "JsonRpcResponseFirewall",
     "NamespaceRoutingResult",
     "RefDepthGuard",
     "RefDepthReport",
+    "RpcFirewallDecision",
+    "RpcFirewallViolation",
     "ToolCallJsonRepairer",
+    "ToolCatalogPruner",
     "ToolNamespaceRouter",
+    "ToolPruneResult",
+    "audit_rpc_transcript",
+    "filter_tools_for_intent",
     "merge_server_manifests",
     "repair_truncated_json",
+    "tokenize_mcp_text",
 ]

@@ -21,6 +21,7 @@ from .slimmer import (
     SchemaSlimmer,
     SlimStats,
     SseChunkThrottle,
+    ToolCatalogPruner,
     audit_tools_manifest,
     build_audit_sarif,
     diff_tools_manifests,
@@ -606,6 +607,74 @@ def run_merge(
   return 0
 
 
+def run_prune(
+    path: Path | None,
+    *,
+    intent: str,
+    top_k: int = 12,
+    min_score_ratio: float = 0.15,
+    always_keep: list[str] | None = None,
+    slim: bool = False,
+    json_output: bool = False,
+    sarif_path: Path | None = None,
+) -> int:
+  if path is not None:
+    if not path.exists():
+      sys.stderr.write(f"Manifest file not found: {path}\n")
+      return 1
+    loaded = _load_tools_file(path)
+    if loaded is None:
+      sys.stderr.write(f"Could not locate a tools list inside {path}\n")
+      return 1
+    tools = loaded
+  else:
+    tools = SAMPLE_BENCHMARK_TOOLS
+
+  pruner = ToolCatalogPruner(
+      intent=intent,
+      top_k=top_k,
+      min_score_ratio=min_score_ratio,
+      always_keep=always_keep,
+      slim_schemas=slim,
+  )
+  res = pruner.prune(tools)
+  report = res.to_audit_report()
+
+  if sarif_path is not None:
+    sarif_doc = build_audit_sarif(
+        report,
+        source_uri=str(path) if path is not None else "sample_tools.json",
+        version=__version__,
+    )
+    sarif_path.parent.mkdir(parents=True, exist_ok=True)
+    sarif_path.write_text(
+        json.dumps(sarif_doc, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+  if json_output:
+    print(json.dumps(report, indent=2, ensure_ascii=False))
+    return 0
+
+  print(f"mcp-slim BM25+ Intent Catalog Pruner (intent={intent!r}, top_k={top_k})")
+  print("=" * 78)
+  print(
+      f"Tools: {res.tools_before} -> {res.tools_after} (pruned {res.tools_pruned}) | "
+      f"Tokens: {res.tokens_before} -> {res.tokens_after} (-{res.reduction_pct}%)"
+  )
+  print("-" * 78)
+  print(f"{'TOOL NAME':<34} | {'BM25+':>8} | {'STATUS':>8} | {'MATCHED TERMS'}")
+  print("-" * 78)
+  for row in res.ranked_scores[:25]:
+    status_lbl = "PINNED" if row["pinned"] else ("KEPT" if row["kept"] else "PRUNED")
+    terms_str = ", ".join(row["matched_terms"][:6])
+    print(
+        f"{row['name']:<34.34} | {row['score']:>8.3f} | {status_lbl:>8} | {terms_str}"
+    )
+  print("=" * 78)
+  return 0
+
+
 async def _inspect_stdio_server(command: list[str], timeout: float = 15.0) -> list[dict[str, Any]]:
   """Spawns a live MCP stdio server, performs initialize + tools/list handshake, and returns tools."""
   proc = await asyncio.create_subprocess_exec(
@@ -769,6 +838,9 @@ def wrap_config(
     token_budget: int = 0,
     window_decay: float = 0.85,
     repair_truncated_json: bool = False,
+    prune_tools: str | None = None,
+    top_k_tools: int = 12,
+    strict_rpc_ids: bool = False,
 ) -> int:
   data = json.loads(config_path.read_text(encoding="utf-8"))
   servers = data.get("mcpServers")
@@ -816,6 +888,12 @@ def wrap_config(
         prefix.extend(["--window-decay", str(window_decay)])
     if repair_truncated_json:
       prefix.append("--repair-truncated-json")
+    if prune_tools:
+      prefix.extend(["--prune-tools", prune_tools])
+      if top_k_tools != 12:
+        prefix.extend(["--top-k-tools", str(top_k_tools)])
+    if strict_rpc_ids:
+      prefix.append("--strict-rpc-ids")
     prefix.append("--")
     if runner == "npx":
       spec["command"] = "npx"
@@ -947,6 +1025,23 @@ def main(argv: list[str] | None = None) -> int:
       "--repair-truncated-json",
       action="store_true",
       help="Structurally repair truncated or lightly malformed streaming tool-call JSON arguments (MS015)",
+  )
+  run_p.add_argument(
+      "--prune-tools",
+      type=str,
+      default=None,
+      help="Prune tools/list catalog using multi-field BM25+ ranking for the given task intent (MS017)",
+  )
+  run_p.add_argument(
+      "--top-k-tools",
+      type=int,
+      default=12,
+      help="Maximum tools retained when --prune-tools is active (default: 12)",
+  )
+  run_p.add_argument(
+      "--strict-rpc-ids",
+      action="store_true",
+      help="Enforce stateful JSON-RPC 2.0 response ID correlation, replay blocking, and batch firewall (MS018)",
   )
   run_p.add_argument(
       "--block-roots",
@@ -1161,6 +1256,23 @@ def main(argv: list[str] | None = None) -> int:
       help="Wrap servers with --repair-truncated-json structural JSON repair",
   )
   wrap_p.add_argument(
+      "--prune-tools",
+      type=str,
+      default=None,
+      help="Wrap servers with --prune-tools BM25+ intent-aware catalog pruning",
+  )
+  wrap_p.add_argument(
+      "--top-k-tools",
+      type=int,
+      default=12,
+      help="Maximum tools retained when paired with --prune-tools (default: 12)",
+  )
+  wrap_p.add_argument(
+      "--strict-rpc-ids",
+      action="store_true",
+      help="Wrap servers with --strict-rpc-ids JSON-RPC response correlation firewall",
+  )
+  wrap_p.add_argument(
       "--runner",
       choices=("mcp-slim", "uvx", "npx"),
       default="mcp-slim",
@@ -1267,6 +1379,60 @@ def main(argv: list[str] | None = None) -> int:
       "--fail-on-conflict",
       action="store_true",
       help="Exit with code 2 when MS016 tool collisions or conflicting $defs schemas are detected",
+  )
+
+  prune_p = sub.add_parser(
+      "prune",
+      help="Rank and prune an MCP tools JSON manifest for a task intent using BM25+ subword scoring (MS017)",
+  )
+  prune_p.add_argument(
+      "file",
+      type=Path,
+      nargs="?",
+      default=None,
+      help="Optional path to tools JSON manifest (defaults to built-in benchmark fixture)",
+  )
+  prune_p.add_argument(
+      "--intent",
+      "-q",
+      required=True,
+      type=str,
+      help="Task description or query keywords used to rank tools",
+  )
+  prune_p.add_argument(
+      "--top-k",
+      type=int,
+      default=12,
+      help="Maximum matched tools to retain (default: 12)",
+  )
+  prune_p.add_argument(
+      "--min-score-ratio",
+      type=float,
+      default=0.15,
+      help="Relative BM25+ score cutoff [0.0..1.0] vs top match (default: 0.15)",
+  )
+  prune_p.add_argument(
+      "--always-keep",
+      type=str,
+      default=None,
+      help="Comma-separated tool names or glob patterns always retained",
+  )
+  prune_p.add_argument(
+      "--slim",
+      action="store_true",
+      help="Compact retained tool schemas with SchemaSlimmer",
+  )
+  prune_p.add_argument(
+      "--json",
+      action="store_true",
+      dest="json_output",
+      help="Emit structured JSON prune report",
+  )
+  prune_p.add_argument(
+      "--sarif",
+      type=Path,
+      default=None,
+      help="Write OASIS SARIF v2.1.0 report to the specified path",
   )
 
   inspect_p = sub.add_parser(
@@ -1385,6 +1551,23 @@ def main(argv: list[str] | None = None) -> int:
         fail_on_conflict=parsed.fail_on_conflict,
     )
 
+  if parsed.subcommand == "prune":
+    keep_list = (
+        [x.strip() for x in parsed.always_keep.split(",") if x.strip()]
+        if parsed.always_keep
+        else None
+    )
+    return run_prune(
+        parsed.file,
+        intent=parsed.intent,
+        top_k=parsed.top_k,
+        min_score_ratio=parsed.min_score_ratio,
+        always_keep=keep_list,
+        slim=parsed.slim,
+        json_output=parsed.json_output,
+        sarif_path=parsed.sarif,
+    )
+
   if parsed.subcommand == "inspect":
     cmd = list(parsed.command)
     if cmd and cmd[0] == "--":
@@ -1411,6 +1594,9 @@ def main(argv: list[str] | None = None) -> int:
         token_budget=parsed.token_budget,
         window_decay=parsed.window_decay,
         repair_truncated_json=parsed.repair_truncated_json,
+        prune_tools=parsed.prune_tools,
+        top_k_tools=parsed.top_k_tools,
+        strict_rpc_ids=parsed.strict_rpc_ids,
     )
 
   if parsed.subcommand == "bridge":
@@ -1487,6 +1673,9 @@ def main(argv: list[str] | None = None) -> int:
         block_result_injection=parsed.block_result_injection,
         detect_replay=parsed.detect_replay,
         repair_truncated_json=parsed.repair_truncated_json,
+        prune_tools_intent=parsed.prune_tools,
+        prune_top_k=parsed.top_k_tools,
+        strict_rpc_ids=parsed.strict_rpc_ids,
         block_roots=parsed.block_roots,
         allow_root_prefixes=allow_root_set,
         deny_root_prefixes=deny_root_set,

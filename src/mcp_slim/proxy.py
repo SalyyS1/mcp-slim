@@ -13,6 +13,7 @@ from typing import Any, Callable, Awaitable
 from .guard import SecretGuard, StreamSanitizer, ToolCallStreamSanitizer
 from .slimmer import (
     ElicitationGuard,
+    JsonRpcResponseFirewall,
     LazyToolBroker,
     OutputSlimmer,
     ResourceUriGuard,
@@ -20,6 +21,7 @@ from .slimmer import (
     SchemaSlimmer,
     SlimStats,
     ToolCallReplayGuard,
+    ToolCatalogPruner,
     TokenWindowGovernor,
     ToolPinGuard,
     scan_tool_result_for_injection,
@@ -66,6 +68,12 @@ class MCPProxy:
       detect_replay: bool = False,
       replay_guard: ToolCallReplayGuard | None = None,
       repair_truncated_json: bool = False,
+      prune_tools_intent: str | None = None,
+      prune_top_k: int = 12,
+      tool_pruner: ToolCatalogPruner | None = None,
+      strict_rpc_ids: bool = False,
+      max_batch_size: int = 32,
+      rpc_firewall: JsonRpcResponseFirewall | None = None,
   ) -> None:
     self.schema_slimmer = schema_slimmer or SchemaSlimmer()
     self.output_slimmer = output_slimmer or OutputSlimmer()
@@ -147,6 +155,23 @@ class MCPProxy:
         if replay_guard is not None
         else ToolCallReplayGuard(enabled=detect_replay)
     )
+    self.tool_pruner = (
+        tool_pruner
+        if tool_pruner is not None
+        else ToolCatalogPruner(
+            intent=prune_tools_intent,
+            top_k=max(1, int(prune_top_k)),
+            fallback_to_all=True,
+        )
+    )
+    self.rpc_firewall = (
+        rpc_firewall
+        if rpc_firewall is not None
+        else JsonRpcResponseFirewall(
+            enabled=strict_rpc_ids,
+            max_batch_size=max(1, int(max_batch_size)),
+        )
+    )
     self._pending_methods: dict[str | int, str] = {}
     self._pending_tool_names: dict[str | int, str] = {}
     self._pending_args: dict[str | int, Any] = {}
@@ -203,8 +228,41 @@ class MCPProxy:
     try:
       msg = json.loads(raw_line)
     except json.JSONDecodeError:
+      if self.rpc_firewall.enabled:
+        self.rpc_firewall.note_unparseable_client_frame()
+      return raw_line
+    if isinstance(msg, list):
+      if self.rpc_firewall.enabled:
+        c_viols = self.rpc_firewall.register_client_payload(msg)
+        blocking_c = [
+            v
+            for v in c_viols
+            if v.kind in ("empty_batch", "batch_disabled", "oversized_batch")
+        ]
+        if blocking_c:
+          self.stats.blocked_calls += 1
+          self.stats.rpc_spoofs_blocked += 1
+          err_reply = {
+              "jsonrpc": "2.0",
+              "id": None,
+              "error": {"code": -32600, "message": f"[mcp-slim] {blocking_c[0].message}"},
+          }
+          self._local_responses.append(
+              json.dumps(err_reply, ensure_ascii=False, separators=(",", ":")) + "\n"
+          )
+          return ""
+      for item in msg:
+        if isinstance(item, dict) and item.get("id") is not None and isinstance(item.get("method"), str):
+          self._pending_methods[item["id"]] = item["method"]
+      if self.secret_guard.enabled:
+        clean_batch = self.secret_guard.resolve_handles_in_value(
+            self.secret_guard.redact_value(msg)
+        )
+        return json.dumps(clean_batch, ensure_ascii=False, separators=(",", ":")) + "\n"
       return raw_line
     if not isinstance(msg, dict):
+      if self.rpc_firewall.enabled:
+        self.rpc_firewall.note_unparseable_client_frame()
       return raw_line
 
     msg_id = msg.get("id")
@@ -572,6 +630,8 @@ class MCPProxy:
         )
         return ""
 
+    if "id" in msg and isinstance(method, str) and self.rpc_firewall.enabled:
+      self.rpc_firewall.register_client_payload(msg)
     if msg_id is not None and isinstance(method, str):
       self._pending_methods[msg_id] = method
       if resolved_tool_name is not None:
@@ -741,7 +801,61 @@ class MCPProxy:
     try:
       msg = json.loads(raw_line)
     except json.JSONDecodeError:
+      if self.rpc_firewall.enabled:
+        self.stats.blocked_calls += 1
+        self.stats.rpc_spoofs_blocked += 1
+        if not self.quiet:
+          sys.stderr.write("[mcp-slim] Security Alert MS018: Dropped non-JSON server frame.\n")
+        return ""
       return raw_line
+
+    if self.rpc_firewall.enabled:
+      fw_ts = time.time_ns()
+      fw_dec = self.rpc_firewall.inspect_server_payload(msg)
+      if fw_dec.violations:
+        dropped = (
+            max(1, fw_dec.dropped_count)
+            if (not fw_dec.allowed or fw_dec.dropped_count > 0)
+            else 0
+        )
+        self.stats.blocked_calls += dropped
+        self.stats.rpc_spoofs_blocked += dropped
+        if not self.quiet:
+          for viol in fw_dec.violations:
+            sys.stderr.write(f"[mcp-slim] Security Alert MS018: {viol.message}\n")
+        self._emit_span(
+            name="mcp.rpc_firewall",
+            kind="CLIENT",
+            start_ns=fw_ts,
+            end_ns=fw_ts,
+            is_error=True,
+            error_message=fw_dec.violations[0].message,
+            attributes={
+                "mcp.method.name": "jsonrpc.firewall",
+                "mcp_slim.cache_hit": False,
+                "mcp_slim.blocked": True,
+                "mcp_slim.rpc_spoof_blocked": True,
+                "mcp_slim.violation_kind": fw_dec.violations[0].kind,
+            },
+        )
+      if not fw_dec.allowed or fw_dec.sanitized_payload is None:
+        return ""
+      msg = fw_dec.sanitized_payload
+
+    if isinstance(msg, list):
+      for elem in msg:
+        if isinstance(elem, dict) and elem.get("id") is not None:
+          self._pending_methods.pop(elem["id"], None)
+          self._pending_tool_names.pop(elem["id"], None)
+      redacted_batch = self.secret_guard.redact_value(msg)
+      serialized_batch = json.dumps(redacted_batch, ensure_ascii=False, separators=(",", ":"))
+      if not self.secret_guard.vault_handles:
+        serialized_batch = self.secret_guard.redact_text(serialized_batch)
+      out_batch = serialized_batch + "\n"
+      self.stats.wire_bytes_before += len(raw_line.encode("utf-8"))
+      self.stats.wire_bytes_after += len(out_batch.encode("utf-8"))
+      return out_batch
+
     if not isinstance(msg, dict):
       return raw_line
 
@@ -1079,24 +1193,47 @@ class MCPProxy:
               sys.stderr.write(f"[mcp-slim] Security Pin Alert: {pm.message}\n")
           tools = self.secret_guard.redact_value(verified_tools)
           sanitized_tok = estimate_tokens(tools)
-          slimmed_list = self.schema_slimmer.slim_tools_list(
-              tools, stats=None if self.lazy_broker is not None else self.stats
-          )
-          if not self.quiet and self.schema_slimmer.policy_warnings:
-            for warn_msg in self.schema_slimmer.policy_warnings:
-              sys.stderr.write(f"[mcp-slim] Warning: {warn_msg}\n")
-          for t in slimmed_list:
-            if isinstance(t.get("name"), str):
-              self._cached_tools[t["name"]] = t
-          if self.cli_only:
-            result["tools"] = []
-          elif self.lazy_broker is not None:
-            result["tools"] = self.lazy_broker.ingest_tools(
-                tools, stats=self.stats
+          if (
+              self.tool_pruner is not None
+              and self.tool_pruner.enabled
+              and self.lazy_broker is None
+              and not self.cli_only
+          ):
+            prune_res = self.tool_pruner.prune(tools)
+            self.stats.tools_pruned += prune_res.tools_pruned
+            slimmed_list = self.schema_slimmer.slim_tools_list(
+                prune_res.tools, stats=None
             )
-          else:
+            self.stats.tools_total += len(tools)
+            self.stats.tools_kept += len(slimmed_list)
+            self.stats.schema_tokens_before += orig_tok
+            self.stats.schema_tokens_after += estimate_tokens(slimmed_list)
+            if not self.quiet and self.schema_slimmer.policy_warnings:
+              for warn_msg in self.schema_slimmer.policy_warnings:
+                sys.stderr.write(f"[mcp-slim] Warning: {warn_msg}\n")
+            for t in slimmed_list:
+              if isinstance(t.get("name"), str):
+                self._cached_tools[t["name"]] = t
             result["tools"] = slimmed_list
-          self.stats.schema_tokens_before += orig_tok - sanitized_tok
+          else:
+            slimmed_list = self.schema_slimmer.slim_tools_list(
+                tools, stats=None if self.lazy_broker is not None else self.stats
+            )
+            if not self.quiet and self.schema_slimmer.policy_warnings:
+              for warn_msg in self.schema_slimmer.policy_warnings:
+                sys.stderr.write(f"[mcp-slim] Warning: {warn_msg}\n")
+            for t in slimmed_list:
+              if isinstance(t.get("name"), str):
+                self._cached_tools[t["name"]] = t
+            if self.cli_only:
+              result["tools"] = []
+            elif self.lazy_broker is not None:
+              result["tools"] = self.lazy_broker.ingest_tools(
+                  tools, stats=self.stats
+              )
+            else:
+              result["tools"] = slimmed_list
+            self.stats.schema_tokens_before += orig_tok - sanitized_tok
       elif method == "tools/call" or isinstance(result.get("content"), list):
         governed_turn = self.window_governor.enabled
         result = self.output_slimmer.slim_call_result(
@@ -1311,6 +1448,8 @@ class MCPProxy:
       self._bridge_waiters[req_id] = fut
       self._pending_methods[req_id] = "tools/list"
       list_msg = {"jsonrpc": "2.0", "id": req_id, "method": "tools/list", "params": {}}
+      if self.rpc_firewall.enabled:
+        self.rpc_firewall.register_client_payload(list_msg)
       await send_upstream(json.dumps(list_msg, separators=(",", ":")) + "\n")
       await asyncio.wait_for(fut, timeout=timeout)
 
