@@ -3749,3 +3749,23 @@ class LatencyHistogram:
         "methods": self.all_stats(),
         "total_observations": self.total_observations(),
     }
+
+
+# ---------------------------------------------------------------------------
+# MS013 / MS014 -- imported from dedicated module
+# ---------------------------------------------------------------------------
+from ._ms013_ms014 import (  # noqa: E402
+    CollisionReport,
+    NamespaceRoutingResult,
+    RefDepthGuard,
+    RefDepthReport,
+    ToolNamespaceRouter,
+)
+
+__all__ = [
+    "CollisionReport",
+    "NamespaceRoutingResult",
+    "RefDepthGuard",
+    "RefDepthReport",
+    "ToolNamespaceRouter",
+]

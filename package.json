@@ -1,6 +1,6 @@
 {
   "name": "mcp-slim",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Zero-dependency MCP JSON-RPC 2.0 stdio proxy for context token compression (-48.8% to -98.7%), elicitation phishing firewall, roots privacy boundaries, cross-tool shadowing detection, sliding token-window budgets, and real-time secret redaction.",
   "license": "MIT",
   "author": "SalyyS1",

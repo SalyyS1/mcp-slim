@@ -1,6 +1,6 @@
 """mcp-slim: Zero-dependency MCP JSON-RPC 2.0 proxy for token compression, lazy discovery, and secret redaction."""
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"
 
 from .guard import (
     RedactionReport,
@@ -12,10 +12,14 @@ from .proxy import MCPProxy
 from .server import handle_server_rpc, run_serve
 from .slimmer import (
     BranchContract,
+    CollisionReport,
     ElicitationGuard,
     LazyToolBroker,
     LatencyHistogram,
+    NamespaceRoutingResult,
     OutputSlimmer,
+    RefDepthGuard,
+    RefDepthReport,
     ResourceUriGuard,
     RootsPrivacyGuard,
     SchemaSlimmer,
@@ -23,6 +27,7 @@ from .slimmer import (
     SseChunkDecision,
     SseChunkThrottle,
     ToolCallReplayGuard,
+    ToolNamespaceRouter,
     TokenWindowGovernor,
     ToolMutation,
     ToolPinGuard,
@@ -44,13 +49,17 @@ from .telemetry import OTelSpanExporter, StatsLedger, derive_server_label
 
 __all__ = [
     "BranchContract",
+    "CollisionReport",
     "ElicitationGuard",
     "LazyToolBroker",
     "LatencyHistogram",
     "MCPProxy",
+    "NamespaceRoutingResult",
     "OTelSpanExporter",
     "OutputSlimmer",
     "RedactionReport",
+    "RefDepthGuard",
+    "RefDepthReport",
     "ResourceUriGuard",
     "RootsPrivacyGuard",
     "SchemaSlimmer",
@@ -64,6 +73,7 @@ __all__ = [
     "ToolCallStreamSanitizer",
     "ToolMutation",
     "ToolCallReplayGuard",
+    "ToolNamespaceRouter",
     "ToolPinGuard",
     "UnionContract",
     "WindowBudgetDecision",

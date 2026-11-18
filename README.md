@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml/badge.svg)](https://github.com/SalyyS1/mcp-slim/actions/workflows/ci.yml)
 [![Live Playground](https://img.shields.io/badge/Live_Playground-Try_in_Browser-2ea043)](https://salyys1.github.io/mcp-slim/)
-[![Version: v1.5.0](https://img.shields.io/badge/version-v1.5.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.5.0)
+[![Version: v1.7.0](https://img.shields.io/badge/version-v1.7.0-blue)](https://github.com/SalyyS1/mcp-slim/releases/tag/v1.7.0)
 [![Glama MCP Score](https://glama.ai/mcp/servers/SalyyS1/mcp-slim/badges/score.svg)](https://glama.ai/mcp/servers/SalyyS1/mcp-slim)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://github.com/SalyyS1/mcp-slim)
 [![Zero Install: npx / uvx](https://img.shields.io/badge/zero--install-npx%20%7C%20uvx-f59e0b)](https://github.com/SalyyS1/mcp-slim#installation--quick-start)
@@ -44,7 +44,7 @@ flowchart LR
 
 ## Comparison with Existing Approaches
 
-| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.5.0`)** |
+| Capability | Raw MCP Server | `mcp-filter` | Atlassian `mcp-compressor` | Claude Native `ToolSearch` | **`mcp-slim` (`v1.7.0`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **Runtime Dependencies** | Varies | Node.js | Python + deps | Built into Claude Code only | **0 (Pure Python 3.10+ stdlib)** |
 | **Zero-Install `npx` & `uvx` Launchers** | Varies | `npx` only | `pip`/`uvx` | Built-in | **Yes (`npx -y github:SalyyS1/mcp-slim` & `uvx`)** |
@@ -281,10 +281,40 @@ Scans `tools/list` schemas and `tools/call`, `resources/read`, and `prompts/get`
 - **Mid-Session Rug-Pull Pinning (`--pin-schemas`) & `mcp-slim diff`:** Computes deterministic SHA-256 fingerprints over `(name, description, inputSchema, annotations)` on initial `tools/list` discovery, quarantines any tool that silently mutates its description/schema, escalates `ToolAnnotations` authority (`readOnlyHint: true -> false`, `destructiveHint: false -> true`), or injects unannounced tools mid-session, and blocks `tools/call` against quarantined tools. Run `mcp-slim diff before.json after.json --fail-on-mutation --sarif diff.sarif` (`MS005`) in CI to gate MCP server upgrades.
 - **Structured OpenTelemetry JSONL Spans (`--otel-jsonl` / `MCP_SLIM_OTEL_JSONL`):** Appends W3C/OTLP-aligned NDJSON trace spans (`trace_id`, `span_id`, `duration_ms`, token savings, inlined `$ref` counts, cache hits, policy blocks, and redaction counts, with zero raw secret exposure) for OpenTelemetry Filelog collectors, Grafana Tempo, Langfuse, and `jq` analysis.
 
-### 5. Standalone MCP Server Mode (`mcp-slim serve`)
+### 5. `RefDepthGuard` \& `ToolNamespaceRouter` (v1.7.0)
+
+- **JSON Schema Recursive `$ref` Depth Guard (`MS013`, `RefDepthGuard`):** Audits every tool's `inputSchema` for cyclic and deeply-nested `$ref` chains that would cause token explosion when inlined. Detects direct self-references (`Node -> Node`), mutual cycles (`A <-> B`), and linear chains that exceed the configurable `max_ref_depth` limit (default 20). Reports OASIS SARIF v2.1.0 results locating each violation by JSON Pointer path and resolution depth. Integrate standalone or as a pre-flight check before `SchemaSlimmer` runs:
+
+```python
+from mcp_slim import RefDepthGuard
+
+guard = RefDepthGuard(max_ref_depth=10)
+reports = guard.audit_tools(tools_list)
+for report in reports:
+    if report.has_violations:
+        print(report.tool_name, report.violations)
+        sarif_results = report.to_sarif_results()
+```
+
+- **Cross-Server Tool-Name Collision Detector \& Namespace Prefix Router (`MS014`, `ToolNamespaceRouter`):** When an MCP proxy aggregates tools from multiple upstream servers, identical tool names from different servers cause silent ambiguity. `ToolNamespaceRouter` detects all collisions, optionally rewrites conflicting tool names to `{server_id}__{tool_name}` (or any custom separator), and reports each collision as a SARIF v2.1.0 result. Activate `prefix_all=True` for strict namespace isolation across all tools regardless of collision:
+
+```python
+from mcp_slim import ToolNamespaceRouter
+
+router = ToolNamespaceRouter(apply_prefix=True)
+result = router.route({
+    "fileserver": [{"name": "read_file", ...}],
+    "gitserver": [{"name": "read_file", ...}, {"name": "commit", ...}],
+})
+# result.routed_tools["fileserver"][0]["name"] == "fileserver__read_file"
+# result.routed_tools["gitserver"][0]["name"] == "gitserver__read_file"
+# result.routed_tools["gitserver"][1]["name"] == "commit"  (no collision)
+```
+
+### 6. Standalone MCP Server Mode (`mcp-slim serve`)
 In addition to wrapping upstream servers via `mcp-slim run`, running `mcp-slim serve` (the default Docker `CMD`) exposes `compact_mcp_tools`, `audit_mcp_schema`, `diff_mcp_tools`, `audit_mcp_resources`, `audit_mcp_elicitation`, `compact_mcp_output`, `sanitize_stream_chunks`, `redact_secrets`, and `get_slim_stats` directly over MCP JSON-RPC 2.0 stdio.
 
-### 6. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
+### 7. Local Unix Socket CLI Bridge & Shell Composition (`--bridge-socket` & `--cli-only`)
 For coding agents (Claude Code, OpenCode, Aider, Cursor) that prefer invoking MCP tools from Bash and piping results through `jq`, `grep`, or `awk` without paying per-turn `tools/list` schema tokens:
 - `--cli-only` returns an empty `tools: []` array to the host IDE (`0` schema tokens in the model prompt) while caching the compacted `inputSchema` definitions in memory.
 - `--bridge-socket /tmp/mcp.sock` multiplexes `mcp-slim bridge` CLI commands directly over the single live stdio MCP server process:
@@ -304,7 +334,7 @@ mcp-slim bridge -s /tmp/mcp-github.sock search_repositories '{"query":"mcp"}' | 
 ## Testing
 
 ```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
+PYTHONPATH=src python3 -m pytest tests/ -q  # 179 tests cover MS001..MS014 and all proxy components
 python3 benchmarks/run_benchmarks.py
 ```
 
